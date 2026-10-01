@@ -288,6 +288,86 @@ res.status(201).json({
 
 ### Abhi baaki
 
-- `controller` me `try/catch` nahi hai (DB error par request hang ho sakti hai).
-- Cookie me `httpOnly` option abhi nahi laga.
-- Login API aage banegi.
+- Login controller me `try/catch` nahi hai (register me hai).
+- Logout API, protected routes (token verify middleware) aage banenge.
+
+## Step 6: Register hardening + Login API
+
+### Register me `try/catch`
+
+Pehle readme me likha tha ki bina try/catch ke request hang ho sakti hai. Ye galat tha: Express 5 me async error apne aap error handler tak jaata hai, request hang nahi hoti. Par client ko default HTML wala 500 milta tha. `try/catch` se JSON error milta hai aur cases alag handle hote hain:
+
+```js
+} catch (error) {
+    // schema validation fail (galat email, chhota password, etc.)
+    if (error.name === 'ValidationError') {
+        return res.status(400).json({
+            message: Object.values(error.errors).map(e => e.message).join(', '),
+            status: 'failed'
+        })
+    }
+
+    // do request ek saath aayi to unique index duplicate email par E11000 deta hai
+    if (error.code === 11000) {
+        return res.status(422).json({ message: "User already exists with this email.", status: "failed" })
+    }
+
+    console.error('Register error:', error);   // asli error sirf server log me
+    return res.status(500).json({ message: "Something went wrong, please try again later.", status: "failed" })
+}
+```
+
+- `400` -> validation fail, `422` -> email duplicate, `500` -> baaki sab (jaise DB down).
+- Client ko andar ki detail nahi jaati, sirf log me jaati hai.
+
+### Cookie options
+
+```js
+res.cookie('jwt_token', token, {
+    httpOnly: true,                                  // JS (document.cookie) se read nahi hogi, XSS se token chori nahi hoga
+    maxAge: 3 * 24 * 60 * 60 * 1000,                 // 3 din (ms me), token expiry ke barabar
+    sameSite: 'strict',                              // dusri site se request me cookie nahi jayegi (CSRF se bachav)
+    secure: process.env.NODE_ENV === 'production'    // production me sirf HTTPS par
+});
+```
+
+`secure` local me `false` rakha hai, warna HTTP wale localhost me cookie set hi nahi hoti.
+
+### Login API: `POST /api/auth/login`
+
+Route (`auth.routes.js`):
+
+```js
+router.post('/login', userLoginController);
+```
+
+Flow:
+1. `email` se user dhundo, **password ke saath** (`.select("+password")`).
+2. User na mile ya password galat ho, dono me same message: `401 "Email or password is not valid"` (taaki koi andaza na laga sake ki email register hai ya nahi).
+3. Sahi ho to JWT banao, cookie set karo, `200` ke saath user + token bhejo.
+
+```js
+const user = await userModel.findOne({email}).select("+password");
+if (!user) return res.status(401).json({ status: "failed", message: "Email or password is not valid" });
+
+const isValidPassword = await user.comparePassword(password);
+if (!isValidPassword) return res.status(401).json({ status: "failed", message: "Email or password is not valid" });
+```
+
+### Error: `data and hash arguments required`
+
+Login me `bcrypt.compare` ye error de raha tha.
+
+- **Wajah:** schema me `password` par `select: false` hai, to `findOne({email})` password laata hi nahi. `this.password` `undefined` mila, aur bcrypt ko hash nahi mila.
+- **Fix:** query me `.select("+password")` lagaya (`+` ka matlab: baaki fields ke saath ye hidden field bhi lao).
+
+```js
+// pehle (galat)
+const user = await userModel.findOne({email});
+// ab
+const user = await userModel.findOne({email}).select("+password");
+```
+
+Ye wahi cheez hai jo Step 4 me `comparePassword` ke note me likhi thi.
+
+Debug ke liye `comparePassword` me `console.log` lagaye the jo password aur hash print karte the. Wo hata diye, secrets kabhi log me nahi jaane chahiye.
