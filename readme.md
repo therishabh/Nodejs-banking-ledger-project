@@ -605,3 +605,48 @@ Poora `src` ek baar format kiya:
 ```bash
 npx prettier --write src
 ```
+
+
+## Step 10: Transaction aur Ledger models
+
+Paisa bhejne ke liye 2 naye mongoose models banaye (abhi sirf schema, API aage banegi).
+
+### 1. Transaction model (`src/models/transaction.model.js`)
+
+Ek account se doosre account me paisa bhejne ka record.
+
+- `fromAccount` / `toAccount` -> `account` ke ref, dono `required` + `index`.
+- `status` -> `PENDING` (default), `COMPLETED`, `FAILED`, `REVERTED`.
+- `amount` -> `min: 0.01`, yaani 0 ya negative allow nahi.
+- `idempotencyKey` -> `unique`. Client har request ke saath unique key bhejta hai, to retry / double click par duplicate transaction (double debit) nahi banta.
+- `timestamps: true` -> `createdAt`, `updatedAt`.
+
+```js
+idempotencyKey: {
+    type: String,
+    required: [true, 'Idempotency key is required'],
+    unique: true,
+},
+```
+
+### 2. Ledger model (`src/models/ledger.model.js`)
+
+Har transaction ki 2 entries bante hain: `fromAccount` par **DEBIT**, `toAccount` par **CREDIT**.
+
+- Fields: `account`, `transaction` (dono ref + index), `amount`, `type` (`CREDIT` / `DEBIT`).
+- Saare fields `immutable: true` - ek baar ban gaya to change nahi hoga.
+- `immutable` sirf field update rokta hai, delete nahi. Isliye update/delete wali saari query methods par `pre` hook lagaya jo error throw karta hai:
+
+```js
+function preventLedgerModification(next) {
+    throw new Error('Ledger entries cannot be modified after creation');
+}
+
+ledgerSchema.pre('updateOne', preventLedgerModification);
+ledgerSchema.pre('deleteOne', preventLedgerModification);
+// ... findOneAndUpdate, updateMany, deleteMany, findOneAndDelete etc.
+```
+
+### 3. VS Code settings
+
+`.vscode/settings.json` me `[javascript]` ke liye alag `defaultFormatter` (`vscode.typescript-language-features`) daala.
