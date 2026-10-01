@@ -1,7 +1,17 @@
 const express = require('express');
-
-
+const cookieParser = require('cookie-parser');
+const authRouter = require('./routes/auth.routes');
 
 const app = express();
+
+// Middleware: request body (JSON) ko parse karke `req.body` me daalta hai.
+// Iske bina POST/PUT me bheja gaya JSON `req.body` me undefined aayega.
+// Routes se PEHLE lagana zaroori hai, warna routes ko body nahi milegi.
+app.use(express.json());
+app.use(cookieParser())
+
+
+// Routes
+app.use('/api/auth', authRouter);
 
 module.exports = app;

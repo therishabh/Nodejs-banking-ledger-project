@@ -195,3 +195,99 @@ Sabse badi gap register wali hai: `create` ke baad `res.json(user)` karoge to `s
 const userModel = mongoose.model("user", userSchema);
 module.exports = userModel;
 ```
+
+## Step 5: MongoDB auth fix + Register API
+
+### MongoDB "requires authentication" error
+
+Error aaya: `MongoServerError: Command find requires authentication`.
+
+- **Wajah:** Docker wale Mongo me username/password set tha (`MONGO_INITDB_ROOT_USERNAME`), par `MONGO_URI` me credentials nahi the. Connect ho jata hai, par koi bhi command chalane par error aata hai.
+- **Fix:** `.env` me credentials + `authSource=admin` daala (root user `admin` database me bana hota hai):
+
+```
+MONGO_URI=mongodb://<username>:<password>@localhost:27017/backend-ledger?authSource=admin
+```
+
+Password me `@ : /` jaise special characters ho to URL-encode karna padega.
+`.env.example` me sirf placeholders rakhe hain, asli password kabhi commit nahi karna.
+
+### Naye packages
+
+```bash
+npm install jsonwebtoken cookie-parser
+```
+
+- `jsonwebtoken` -> login token (JWT) banane ke liye
+- `cookie-parser` -> request ki cookies read karne ke liye (`req.cookies`)
+
+`.env` me naya variable: `JWT_SECRET` (token sign karne ki secret key, `.env.example` me bhi add kiya).
+
+### Folder structure (naye folders)
+
+```
+src/
+├── controllers/auth.controller.js   # request ka logic
+└── routes/auth.routes.js            # URL -> controller mapping
+```
+
+### `src/app.js` - middleware + routes
+
+```js
+app.use(express.json());   // body JSON -> req.body
+app.use(cookieParser());   // cookies -> req.cookies
+
+app.use('/api/auth', authRouter);
+```
+
+Middleware hamesha routes se **pehle** lagte hain, warna routes ko body/cookies nahi milti.
+
+### `src/routes/auth.routes.js`
+
+```js
+router.post('/register', userRegisterController);   // POST /api/auth/register
+```
+
+`app.js` me `/api/auth` prefix laga hai, to final URL `/api/auth/register` banta hai.
+
+### Register controller (`auth.controller.js`)
+
+Flow:
+1. `req.body` se `email`, `password`, `name` nikalo.
+2. Email pehle se hai to `422` bhejo.
+3. User create karo (password pre-save hook se apne aap hash hota hai, Step 4).
+4. JWT token banao (3 din valid) aur cookie me set karo.
+5. `201` ke saath user + token bhejo.
+
+```js
+const isEmailExists = await userModel.findOne({email});
+if (isEmailExists) {
+    return res.status(422).json({ message: "User already exists with this email.", status: "failed" });
+}
+
+const user = await userModel.create({ email, name, password });
+
+const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '3d' });
+res.cookie('jwt_token', token);
+
+res.status(201).json({
+    user: { id: user._id, email: user.email, name: user.name },
+    token,
+    message: "User has been successfully created",
+    status: "success"
+});
+```
+
+- `jwt.sign(payload, secret, options)`: payload me `userId` rakha, baad me isi se pata chalega ki request kis user ki hai.
+- Response me user ke fields haath se chune (`id`, `email`, `name`), to password bahar nahi jata.
+
+### Bugs jo fix kiye
+
+- `jwt.sign({userId, user._id}, ...)` -> syntax error tha. Sahi: `{ userId: user._id }` (key aur value alag likhni padti hai).
+- `res.cookies(...)` -> typo, sahi `res.cookie(...)`.
+
+### Abhi baaki
+
+- `controller` me `try/catch` nahi hai (DB error par request hang ho sakti hai).
+- Cookie me `httpOnly` option abhi nahi laga.
+- Login API aage banegi.
