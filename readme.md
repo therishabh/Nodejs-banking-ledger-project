@@ -42,6 +42,7 @@ MongoDB docker me chal raha hai (port `27017`). `http://localhost:27017` sirf br
 
 ```
 MONGO_URI=mongodb://localhost:27017/ledger
+PORT=9000
 ```
 
 (Auth on ho to: `mongodb://user:pass@localhost:27017/ledger?authSource=admin`)
@@ -77,12 +78,14 @@ module.exports = connectToDB;
 
 ### `server.js` - entry point
 
-`dotenv` sabse pehle load hota hai (warna `MONGO_URI` undefined milega), phir DB connect, phir server port `9000` par start.
+`dotenv` sabse pehle load hota hai (warna `MONGO_URI` undefined milega), phir DB connect, phir server start.
+
+Port `.env` ke `PORT` se aata hai. `Number(...) || 9000` ka matlab: `PORT` na ho, khaali ho ya galat value ho (jaise `abc`) to default `9000` use hoga. (`??` ki jagah `||` isliye, kyunki `??` khaali string par fallback nahi deta.)
 
 ```js
 require('dotenv').config();
 const app = require('./src/app');
-const PORT = 9000;
+const PORT = Number(process.env.PORT) || 9000;
 const connectToDB = require('./src/config/db');
 
 connectToDB();
@@ -93,3 +96,16 @@ app.listen(PORT, () => {
 ```
 
 Run karne ke liye: `node server.js`
+
+## Step 3: PORT env se + `.env.example`
+
+- `server.js` me port ab `.env` se aata hai: `Number(process.env.PORT) || 9000` (detail Step 2 me).
+- `.env` git me jaati nahi (`.gitignore` me hai), isliye `.env.example` banayi. Isme sirf dummy/local values hain, jisse koi bhi project clone karke bata sake ki kaun-kaun se variables chahiye:
+
+```
+MONGO_URI=mongodb://localhost:27017/backend-ledger
+PORT=9000
+```
+
+Setup: `cp .env.example .env` karke apni values daal do.
+- Git setup: `git init`, `.gitignore` (`node_modules`, `.env`, `.DS_Store`) aur GitHub remote `origin` add hua.
