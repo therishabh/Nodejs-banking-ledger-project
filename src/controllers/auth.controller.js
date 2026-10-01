@@ -1,5 +1,6 @@
 const userModel = require('../models/user.model');
-const jwt = require('jsonwebtoken')
+const jwt = require('jsonwebtoken');
+const { sendRegistrationEmail } = require('../services/email.service');
 
 /** 
  * - User Register Controller
@@ -44,7 +45,9 @@ async function userRegisterController(req, res) {
             token: token,
             message: "User has been successfully created",
             status : "success"
-        })
+        });
+
+        await sendRegistrationEmail(email, name);
     } catch (error) {
         // schema validation fail (galat email, chhota password, etc.)
         if (error.name === 'ValidationError') {

@@ -371,3 +371,84 @@ const user = await userModel.findOne({email}).select("+password");
 Ye wahi cheez hai jo Step 4 me `comparePassword` ke note me likhi thi.
 
 Debug ke liye `comparePassword` me `console.log` lagaye the jo password aur hash print karte the. Wo hata diye, secrets kabhi log me nahi jaane chahiye.
+
+## Step 7: Welcome email (Nodemailer + Gmail OAuth2)
+
+Register hone ke baad user ko welcome email jata hai.
+
+### Naya package
+
+```bash
+npm install nodemailer
+```
+
+### `.env` me naye variables
+
+Gmail OAuth2 se mail bhejte hain (App password nahi). Placeholders `.env.example` me hain:
+
+```
+EMAIL_USER=your_email@gmail.com
+CLIENT_ID=your_google_client_id
+CLIENT_SECRET=your_google_client_secret
+REFRESH_TOKEN=your_google_refresh_token
+```
+
+Ye Google Cloud Console me OAuth client bana kar aur OAuth Playground se refresh token lekar milte hain. Asli values sirf `.env` me, kabhi commit nahi karni.
+
+### `src/services/email.service.js`
+
+**1. Transporter** - Gmail se connect karta hai:
+
+```js
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    type: 'OAuth2',
+    user: process.env.EMAIL_USER,
+    clientId: process.env.CLIENT_ID,
+    clientSecret: process.env.CLIENT_SECRET,
+    refreshToken: process.env.REFRESH_TOKEN,
+  },
+});
+```
+
+Server start par `transporter.verify(...)` chalta hai: connection sahi ho to console me `Email server is ready to send messages` aata hai, warna error.
+
+**2. `sendEmail(to, subject, text, html)`** - generic function, koi bhi mail bhejne ke liye. Andar `try/catch` hai, to mail fail hone par app crash nahi hota, sirf error log hota hai.
+
+**3. `sendRegistrationEmail(userEmail, name)`** - welcome mail banata hai:
+- `text` = plain version (jahan HTML nahi dikhta).
+- `html` = sundar version (header, welcome message, footer). Email clients external CSS nahi maante, isliye **inline styles + table layout**.
+- Naam HTML me daalne se pehle `escapeHtml` se escape hota hai, warna koi naam me `<script>` daal ke mail kharab kar sakta tha.
+
+```js
+await sendEmail(userEmail, subject, text, html);
+```
+
+Export:
+
+```js
+module.exports = { sendEmail, sendRegistrationEmail };
+```
+
+### Register controller me use
+
+User ban jane aur response bhejne ke baad mail trigger hota hai:
+
+```js
+const { sendRegistrationEmail } = require('../services/email.service');
+...
+await sendRegistrationEmail(email, name);
+```
+
+### Bug jo fix hua
+
+`sendEmail(userEmail, subject, text)` me `html` pass nahi ho raha tha, to sirf plain text mail jati thi. `sendEmail` chaar arguments leta hai, isliye `html` bhi dena zaroori hai.
+
+### Mail na jaye to ye errors dekho
+
+| Error | Matlab |
+|---|---|
+| `ETIMEDOUT` | internet / VPN / firewall se Google tak nahi pahunch pa raha |
+| `invalid_grant` | `REFRESH_TOKEN` expire. OAuth app "Testing" mode me ho to 7 din me expire hota hai, naya token lo ya app "In production" karo |
+| `invalid_client` / `unauthorized_client` | `CLIENT_ID` ya `CLIENT_SECRET` galat |
