@@ -562,3 +562,46 @@ Body (optional): { "currency": "inr" }
 
 - Token ke bina -> `401`.
 - Token ke saath -> `201`, account `currency: "INR"`, `status: "ACTIVE"` ke saath.
+
+
+## Step 9: Prettier (format on save)
+
+### Prettier setup
+
+Save karte hi file apne aap format ho, isliye Prettier lagaya.
+
+```bash
+npm install -D prettier
+```
+
+Naye files:
+
+- `.prettierrc` - code style (maujooda code se match karta hai):
+
+```json
+{
+  "tabWidth": 4,
+  "singleQuote": true,
+  "semi": true
+}
+```
+
+- `.vscode/settings.json` - format on save on karta hai:
+
+```json
+{
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "prettier.requireConfig": true
+}
+```
+
+- `.vscode/extensions.json` - VS Code me Prettier extension recommend karta hai.
+
+VS Code me **Prettier - Code formatter** (`esbenp.prettier-vscode`) extension install karna zaroori hai. `requireConfig: true` ki wajah se ye sirf is project me chalega.
+
+Poora `src` ek baar format kiya:
+
+```bash
+npx prettier --write src
+```
