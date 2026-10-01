@@ -452,3 +452,113 @@ await sendRegistrationEmail(email, name);
 | `ETIMEDOUT` | internet / VPN / firewall se Google tak nahi pahunch pa raha |
 | `invalid_grant` | `REFRESH_TOKEN` expire. OAuth app "Testing" mode me ho to 7 din me expire hota hai, naya token lo ya app "In production" karo |
 | `invalid_client` / `unauthorized_client` | `CLIENT_ID` ya `CLIENT_SECRET` galat |
+
+
+## Step 8: Account API (create account) + auth middleware
+
+User ke paas ab bank-jaisa account ban sakta hai. Iske liye 3 cheezein bani: account model, auth middleware (route protect karne ke liye) aur create account API.
+
+> Note: `ledger.model.js` aur `transaction.model.js` abhi bane hain par is commit me **shamil nahi** hain, unpe baad me kaam hoga.
+
+### Naya folder / files
+
+```
+src/
+├── controllers/account.controller.js
+├── middleware/auth.middleware.js     (naya folder: middleware)
+├── models/account.model.js
+└── routes/account.routes.js
+```
+
+Koi naya package install nahi hua (`jsonwebtoken`, `cookie-parser` pehle se the).
+
+### 1. Account model (`src/models/account.model.js`)
+
+Fields:
+- `user` - kis user ka account hai (`ObjectId`, ref `"user"`, required).
+- `status` - `ACTIVE` / `FROZEN` / `CLOSED`, default `ACTIVE`.
+- `currency` - default `INR`, `uppercase` + `trim` (so `"inr"` -> `"INR"`).
+- `timestamps: true` - `createdAt`, `updatedAt` apne aap.
+
+```js
+status : {
+    type : String, // type ke bina mongoose `status` ko nested object samajh leta hai
+    enum : {
+        values: ["ACTIVE", "FROZEN", "CLOSED"],
+        message : "Status can be either ACTIVE, FROZEN or CLOSED"
+    },
+    default : "ACTIVE"
+},
+```
+
+Index: user ke accounts (status ke saath filter bhi) fast nikalne ke liye.
+
+```js
+accountSchema.index({user: 1, status: 1})
+```
+
+Ye compound index `user` akele ki query bhi cover karta hai, isliye alag se `user` par index nahi lagaya.
+
+### 2. Auth middleware (`src/middleware/auth.middleware.js`)
+
+Protected routes ke liye. Kaam:
+1. Token lo: pehle cookie `jwt_token`, nahi mila to `Authorization: Bearer <token>` header se.
+2. Token nahi hai -> `401`.
+3. `jwt.verify` karke `userId` nikalo, DB se user lo.
+4. User nahi mila ya token galat/expire -> `401`.
+5. Sab sahi -> `req.user = user` set karke `next()`.
+
+```js
+const token = req.cookies?.jwt_token || req.headers.authorization?.split(' ')[1];
+
+if(!token){
+    return res.status(401).json({ status : "failed", message : "Unauthorized access, token is missing" });
+}
+```
+
+**Dhyan rakhne wali baat:** `return res.status(...)` me `return` zaroori hai, warna neeche ka code bhi chalega aur dobara response bhejne par `ERR_HTTP_HEADERS_SENT` aayega.
+
+### 3. Create account controller (`src/controllers/account.controller.js`)
+
+`req.user` middleware se aata hai, to account usi logged-in user ka banta hai. Body se sirf `currency` aur `status` liye jaate hain.
+
+```js
+// Express 5 me body na bheji ho to req.body undefined hota hai, isliye `?? {}`
+const {currency, status} = req.body ?? {};
+
+const account = await accountModel.create({
+    user : currentUser._id,
+    currency: currency,
+    status: status
+});
+```
+
+Body khali ho to `currency`/`status` `undefined` rahte hain aur schema ke defaults (`INR`, `ACTIVE`) lag jaate hain.
+
+Response: `201` + `{ message, status: "success", account }`.
+
+### 4. Route (`src/routes/account.routes.js`) + `app.js`
+
+```js
+router.post('/', authMiddleware, createAccountController);
+```
+
+`src/app.js` me mount kiya:
+
+```js
+const accountRouter = require('./routes/account.routes')
+...
+app.use('/api/accounts', accountRouter);
+```
+
+### Test kaise kare
+
+Pehle login karo (cookie `jwt_token` set hoti hai), phir:
+
+```
+POST /api/accounts
+Body (optional): { "currency": "inr" }
+```
+
+- Token ke bina -> `401`.
+- Token ke saath -> `201`, account `currency: "INR"`, `status: "ACTIVE"` ke saath.
