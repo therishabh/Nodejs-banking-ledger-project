@@ -1,6 +1,7 @@
 # Backend Ledger
 
 Node.js + Express par bana ledger backend. Neeche step-by-step likha hai ki kya-kya aur kaise kiya gaya.
+Youtube Link : [Link](https://www.youtube.com/watch?v=NQOAQP0mow0&t=1s)
 
 ## Step 1: Project setup
 
@@ -650,3 +651,76 @@ ledgerSchema.pre('deleteOne', preventLedgerModification);
 ### 3. VS Code settings
 
 `.vscode/settings.json` me `[javascript]` ke liye alag `defaultFormatter` (`vscode.typescript-language-features`) daala.
+
+
+## Step 11: Create Transaction API (WIP: abhi validation tak)
+
+`POST /api/transactions` ka route + controller banaya. Abhi **sirf starting ke 4 steps** ho paye hain, paisa move karne wala part (ledger entries) aage aayega.
+
+Naye files:
+
+- `src/controllers/transaction.controller.js` -> `createTransactionController`
+- `src/routes/transaction.routes.js` -> route, `authMiddleware` se protected
+
+`src/app.js` me router mount kiya:
+
+```js
+const transactionRouter = require('./routes/transaction.routes');
+app.use('/api/transactions', transactionRouter);
+```
+
+```js
+Router.post('/', authMiddleware, createTransactionController);
+```
+
+### Transaction flow (11 steps, controller ke upar comment me likha hai)
+
+1. Request validate
+2. Idempotency key check
+3. Sender / receiver accounts fetch
+4. Account status check
+5. Sender ka balance ledger se nikalna
+6. Transaction `PENDING` me create
+7. Sender par DEBIT ledger entry
+8. Receiver par CREDIT ledger entry
+9. Transaction `COMPLETED` karna
+10. Success response
+11. Error handling
+
+**Abhi 1-4 + error handling (step 11) done hain. 5-10 baaki hain.**
+
+### Step 1: Request validation
+
+`fromAccount`, `toAccount`, `amount`, `idempotencyKey` me se koi missing ho to `400`.
+
+### Step 2: Idempotency key check
+
+Same `idempotencyKey` se pehle ka transaction mil gaya to naya nahi banta, uske status ke hisaab se response milta hai:
+
+| Existing status | HTTP | `status` in JSON |
+|---|---|---|
+| `COMPLETED` | 200 | `success` |
+| `PENDING` | 202 | `pending` |
+| `FAILED` | 409 | `failed` |
+| `REVERTED` | 409 | `failed` |
+
+- `PENDING` par 202 kyunki abhi process ho raha hai, `success` bolna galat hoga.
+- `FAILED` / `REVERTED` ko `success` nahi bol sakte, isliye 409 + `failed`.
+
+### Step 3: Accounts fetch
+
+```js
+const fromAccountDoc = await accountModel.findById(fromAccount);
+const toAccountDoc = await accountModel.findById(toAccount);
+```
+
+Dono me se koi na mile to `400` (`One or both accounts not found`).
+
+### Step 4: Account status check
+
+Sender ya receiver me se koi bhi `ACTIVE` nahi hai to `400` (`One or both accounts are not active`).
+
+### Baaki kaam
+
+- Step 5-10 controller me abhi implement nahi hain, isliye valid request par abhi response nahi jaata (request hang hogi).
+- `currentUser` (`req.user`) abhi use nahi hua, aur `ledgerModel` import bhi abhi unused hai. Dono aage ke steps me kaam aayenge.
