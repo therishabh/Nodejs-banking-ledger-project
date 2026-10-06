@@ -653,9 +653,9 @@ ledgerSchema.pre('deleteOne', preventLedgerModification);
 `.vscode/settings.json` me `[javascript]` ke liye alag `defaultFormatter` (`vscode.typescript-language-features`) daala.
 
 
-## Step 11: Create Transaction API (WIP: success response baaki)
+## Step 11: Create Transaction API
 
-`POST /api/transactions` ka route + controller banaya. Validation se leke ledger entries + commit tak ho gaya hai, sirf success response (step 10) baaki hai.
+`POST /api/transactions` ka route + controller banaya. Validation se leke ledger entries + commit tak ho gaya hai, success response bhi add ho gaya hai.
 
 Naye files:
 
@@ -687,7 +687,7 @@ Router.post('/', authMiddleware, createTransactionController);
 10. Success response
 11. Error handling
 
-**Steps 1-9 + error handling (step 11) done hain. Sirf step 10 (success response) baaki hai.**
+**Saare 11 steps done hain.**
 
 ### Step 1: Request validation
 
@@ -779,12 +779,164 @@ if (session?.inTransaction()) await session.abortTransaction();
 
 Step 6 wale block me Hinglish comments add kiye (a-e ka flow), taaki code padhke samajh aaye.
 
-### Baaki kaam
+### Step 10: Success response + exports
 
-- Step 10: success response (`201` + transaction details) abhi nahi bheja, isliye valid request par response nahi jaata (request hang hogi).
-- `module.exports = { createTransactionController }` controller file me abhi nahi hai.
-- `currentUser` (`req.user`) abhi use nahi hua. Aage ke steps me kaam aayega.
+Commit ke baad `201 Created` bhejte hain, transaction details ke saath:
+
+```js
+await session.commitTransaction();
+
+return res.status(201).json({
+    message: 'Transaction completed successfully',
+    status: 'success',
+    transaction,
+});
+```
+
+- `return` try ke andar hai, par `finally` phir bhi chalta hai, to `endSession()` hota rahta hai.
+- Controller file ke end me exports:
+
+```js
+module.exports = {
+    createTransactionController,
+    createInitialFundsTransactionController,
+};
+```
 
 ### Side note: ORM
 
 Ledger/transactions jaise kaam ke liye Postgres (ACID, constraints) zyada safe hai. Future me migrate karna ho to **Prisma** ya **Drizzle** achhe options hain. Abhi Mongoose hi chal raha hai.
+
+
+## Step 12: System user + Initial funds API
+
+Naye account me balance 0 hota hai, to pehla paisa kahin se aana chahiye. Iske liye ek **system user** (jaise bank) hota hai jo accounts me initial funds credit karta hai.
+
+### 1. `systemUser` flag (user model)
+
+`src/models/user.model.js` me naya field:
+
+```js
+systemUser: {
+    type: Boolean,
+    default: false,
+    immutable: true, // ek baar set hone ke baad badal nahi sakta
+    select: false,   // query me default nahi aata
+},
+```
+
+- `immutable` hai, isliye ye **create time** pe hi set hota hai. Register API se system user nahi banta, wo DB me (Compass/mongosh) manually `systemUser: true` ke saath banana padega.
+- `select: false` ki wajah se isse padhne ke liye `.select('+systemUser')` lagana padta hai.
+
+### 2. `systemUserAuthMiddleware`
+
+`src/middleware/auth.middleware.js` me naya middleware. Token verify karta hai, user fetch karta hai (`+systemUser` ke saath) aur system user na ho to `401`:
+
+```js
+const user = await userModel.findById(decodedToken.userId).select('+systemUser');
+if (!user || !user.systemUser) { /* 401 */ }
+req.user = user;
+return next();
+```
+
+### 3. Initial funds route + controller
+
+```js
+Router.post("/system/initial-funds", systemUserAuthMiddleware, createInitialFundsTransactionController);
+```
+
+`POST /api/transactions/system/initial-funds`, body: `toAccount`, `amount`, `idempotencyKey`.
+
+Flow:
+
+1. Required fields check (`400`)
+2. `toAccount` fetch (`400 Invalid Account`)
+3. System user ka apna account dhoondho (`fromUserAccount`)
+4. Idempotency key check (same table jo Step 2 me hai)
+5. Session start -> `PENDING` transaction -> **DEBIT** system account, **CREDIT** `toAccount` -> `COMPLETED` -> commit
+6. `201` + transaction
+
+Bugs jo fix kiye:
+
+- Pehle system account ki query `findOne({ systemUser: true, user: req.user._id })` thi. `systemUser` **user** model me hai, account me nahi, to query hamesha empty aati. Ab:
+
+```js
+const fromUserAccount = await accountModel.findOne({
+    user: req.user._id,
+    status: 'ACTIVE',
+});
+```
+
+  (middleware pehle hi system user verify kar chuka hai). Error message `Active account not found for system user`.
+- `create([...])` array return karta hai, to `const [transaction] = await transactionModel.create([...], { session })` likha. Warna `transaction._id` undefined aata.
+- Debug `console.log` aur unused `debitLedgerEntry` / `creditLedgerEntry` variables hata diye.
+
+## Step 13: Chhote changes (account + logout)
+
+### Ek user = ek account
+
+`createAccountController` me create se pehle check:
+
+```js
+const isAccountExist = await accountModel.findOne({ user: currentUser._id });
+if (isAccountExist) {
+    return res.status(400).json({ status: 'failed', message: 'Account already created' });
+}
+```
+
+Response ke saath `return` bhi lagaya.
+
+### Logout API
+
+`POST /api/auth/logout` (`userLogoutController`). Cookie `jwt_token` clear karta hai aur `200` bhejta hai. Token na ho tab bhi `200` (already logged out).
+
+```js
+res.clearCookie('jwt_token');
+return res.status(200).json({ status: 'success', message: 'User logged out successfully' });
+```
+
+Note: JWT stateless hai, isliye header me bheja hua token expire hone tak valid rehta hai. Cookie wala client logout ho jaata hai.
+
+## Step 14: MongoDB replica set (Docker) for transactions
+
+Transaction create karte waqt ye error aaya:
+
+```
+This MongoDB deployment does not support retryable writes. Please add retryWrites=false to your connection string.
+```
+
+**Wajah:** Mongo ke multi-document transactions (`session.startTransaction()`) **replica set** pe hi chalte hain. Local `mongo:latest` container standalone tha. `retryWrites=false` lagana galat fix hai, kyunki uske baad `Transaction numbers are only allowed on a replica set member` aata.
+
+**Fix:** purane container (`mongodb`, 27017) ko touch kiye bina ek naya single-node replica set container (port **27018**):
+
+```bash
+docker run -d --name mongo-rs -p 27018:27017 mongo:7 --replSet rs0 --bind_ip_all
+docker exec mongo-rs mongosh --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
+```
+
+- `host` me **27017** dena hai, kyunki container ke andar mongod isi port pe hai. `27018` dene par `No host described in new configuration ... maps to this node` aata hai.
+
+`.env` me:
+
+```
+MONGO_URI=mongodb://localhost:27018/backend-ledger?replicaSet=rs0&directConnection=true
+```
+
+- `directConnection=true` zaroori hai, warna driver replica set ka host (`localhost:27017`) pakad leta hai jo bahar se kaam nahi karta.
+- Naye container me auth nahi hai (local dev), aur DB khaali hai. Users/accounts/system user dobara banane padenge.
+
+MongoDB Compass connection string:
+
+```
+mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+```
+
+Note: `.env` git-ignored hai, isliye URI commit me nahi jaati.
+
+### Flow test karne ka order
+
+1. Register (normal user + system user DB me manually `systemUser: true` ke saath)
+2. Login
+3. Har user ke liye account create
+4. System user se `POST /api/transactions/system/initial-funds`
+5. Normal user se `POST /api/transactions` (transfer)

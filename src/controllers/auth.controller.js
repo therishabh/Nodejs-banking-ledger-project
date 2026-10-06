@@ -133,7 +133,26 @@ async function userLoginController(req, res) {
     });
 }
 
+async function userLogoutController(req, res) {
+    const token = req.cookies?.jwt_token || req.headers.authorization?.split(' ')[1];
+
+    if (!token) {
+        return res.status(200).json({
+            status: 'success',
+            message: 'User logged out successfully',
+        });
+    }
+
+    res.clearCookie("jwt_token");
+
+    return res.status(200).json({
+        status: 'success',
+        message: 'User logged out successfully',
+    });
+}
+
 module.exports = {
     userRegisterController,
     userLoginController,
+    userLogoutController
 };

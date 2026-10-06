@@ -175,6 +175,15 @@ async function createTransactionController(req, res) {
         // (e) Commit: yahin pe saare changes DB me permanent hote hain
         await session.commitTransaction();
 
+        /**
+         * 10. Return a success response with the transaction details
+         * 201 Created: nayi transaction ban gayi aur COMPLETED ho chuki hai.
+         */
+        return res.status(201).json({
+            message: 'Transaction completed successfully',
+            status: 'success',
+            transaction,
+        });
     } catch (error) {
         // Beech me kuch fail hua to ab tak ke saare writes rollback karo (partial data na bache)
         if (session?.inTransaction()) {
@@ -193,6 +202,139 @@ async function createTransactionController(req, res) {
 }
 
 
+async function createInitialFundsTransactionController(req, res) {
+
+    // try ke bahar declare kiya taaki catch/finally me bhi abort/endSession kar sakein
+    let session = null;
+
+    try {
+        const { toAccount, amount, idempotencyKey } = req.body;
+
+        // Saare required fields hone zaroori hain, warna 400 bhej do
+        if (!toAccount || !amount || !idempotencyKey) {
+            return res.status(400).json({
+                message: 'Missing required fields (toAccount, amount, idempotencyKey)',
+                status: 'failed',
+            });
+        }
+
+        const toUserAccount = await accountModel.findById(toAccount);
+
+        if (!toUserAccount) {
+            return res.status(400).json({
+                message: 'Invalid Account',
+                status: 'failed',
+            });
+        }
+
+        // `systemUser` flag user model me hai (account me nahi). systemUserAuthMiddleware pehle hi
+        // verify kar chuka hai ki req.user system user hai, isliye yahan sirf uska account dhoondhna hai.
+        const fromUserAccount = await accountModel.findOne({
+            user: req.user._id,
+            status: 'ACTIVE',
+        });
+
+        if (!fromUserAccount) {
+            return res.status(400).json({
+                message: 'Active account not found for system user',
+                status: 'failed',
+            });
+        }
+
+        const isTransactionExists = await transactionModel.findOne({ idempotencyKey: idempotencyKey });
+        if (isTransactionExists) {
+            if (isTransactionExists.status === 'COMPLETED') {
+                return res.status(200).json({
+                    message: 'Transaction with the same idempotency key already exists and is completed',
+                    status: 'success',
+                });
+            }
+
+            // Abhi process ho rahi hai -> 202 Accepted, final result nahi hai isliye status 'pending'
+            if (isTransactionExists.status === 'PENDING') {
+                return res.status(202).json({
+                    message: 'Transaction with the same idempotency key already exists and is pending',
+                    status: 'pending',
+                });
+            }
+
+            // Pehle fail ho chuki hai -> success nahi bol sakte, 409 + status 'failed'
+            if (isTransactionExists.status === 'FAILED') {
+                return res.status(409).json({
+                    message: 'Transaction with the same idempotency key already exists and has failed',
+                    status: 'failed',
+                });
+            }
+
+            // Revert ho chuki hai -> 409 + status 'failed'
+            if (isTransactionExists.status === 'REVERTED') {
+                return res.status(409).json({
+                    message: 'Transaction with the same idempotency key already exists and has been reverted',
+                    status: 'failed',
+                });
+            }
+
+            return res.status(409).json({
+                message: 'Transaction with the same idempotency key already exists',
+                status: 'failed',
+            });
+        }
+
+        session = await mongoose.startSession();
+        session.startTransaction();
+
+        const [transaction] = await transactionModel.create([{
+            fromAccount: fromUserAccount._id,
+            toAccount,
+            amount,
+            idempotencyKey,
+            status: "PENDING"
+        }], { session });
+
+        await ledgerModel.create([{
+            type: "DEBIT",
+            transaction: transaction._id,
+            account: fromUserAccount._id,
+            amount
+        }], { session });
+
+        await ledgerModel.create([{
+            type: "CREDIT",
+            transaction: transaction._id,
+            account: toAccount,
+            amount
+        }], { session });
+
+        transaction.status = 'COMPLETED';
+        await transaction.save({ session });
+
+        // (e) Commit: yahin pe saare changes DB me permanent hote hain
+        await session.commitTransaction();
+
+        // Initial funds credit ho gaye -> 201 Created + transaction details
+        return res.status(201).json({
+            message: 'Initial funds transaction completed successfully',
+            status: 'success',
+            transaction,
+        });
+    } catch (error) {
+        // Beech me kuch fail hua to ab tak ke saare writes rollback karo (partial data na bache)
+        if (session?.inTransaction()) {
+            await session.abortTransaction();
+        }
+
+        res.status(500).json({
+            message: 'Failed to create transaction',
+            status: 'failed',
+            error: error.message,
+        });
+    } finally {
+        // Success ho ya error, session hamesha release karo
+        session?.endSession();
+    }
+}
+
 module.exports = {
     createTransactionController,
+    createInitialFundsTransactionController,
 }

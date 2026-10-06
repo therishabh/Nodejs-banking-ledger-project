@@ -6,13 +6,24 @@ async function createAccountController(req, res) {
     // Aisa hone par currency/status undefined rahenge aur schema ke default (INR, ACTIVE) lag jayenge
     const { currency, status } = req.body ?? {};
 
+    const isAccountExist = await accountModel.findOne({
+        user: currentUser._id
+    })
+
+    if (isAccountExist) {
+        return res.status(400).json({
+            status: "failed",
+            message: "Account already created"
+        })
+    }
+
     const account = await accountModel.create({
         user: currentUser._id,
         currency: currency,
         status: status,
     });
 
-    res.status(201).json({
+    return res.status(201).json({
         message: 'Account has been successfully created',
         status: 'success',
         account,

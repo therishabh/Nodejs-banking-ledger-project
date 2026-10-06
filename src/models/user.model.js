@@ -32,6 +32,12 @@ const userSchema = new mongoose.Schema(
             enum: ['user', 'admin'],
             default: 'user',
         },
+        systemUser: {
+            type: Boolean,
+            default: false, // system ke liye internal user (jaise bank admin) banega to true
+            immutable: true, // once set, cannot be changed
+            select: false, // query me default systemUser nahi aayega
+        },
         isActive: {
             type: Boolean,
             default: true, // account disable karna ho to delete ki jagah false kar do

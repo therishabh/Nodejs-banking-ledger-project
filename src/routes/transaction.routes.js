@@ -1,6 +1,6 @@
 const express = require('express');
-const { authMiddleware } = require('../middleware/auth.middleware');
-const { createTransactionController } = require('../controllers/transaction.controller');
+const { authMiddleware, systemUserAuthMiddleware } = require('../middleware/auth.middleware');
+const { createTransactionController, createInitialFundsTransactionController } = require('../controllers/transaction.controller');
 
 
 const Router = express.Router();
@@ -11,5 +11,8 @@ const Router = express.Router();
  * - protected route
  */
 Router.post("/", authMiddleware, createTransactionController);
+Router.post("/system/initial-funds", systemUserAuthMiddleware, createInitialFundsTransactionController);
+
+
 
 module.exports = Router;
