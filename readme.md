@@ -1170,3 +1170,246 @@ Response:
 - `accountId` response me add kiya, `balance: balance` ko short `balance` kiya, aur doc comment daala.
 - `try/catch` nahi lagaya, kyunki Express 5 async errors ko khud error handler tak bhej deta hai.
 - Transfer controller (`createTransactionController`) me wahi null bug tha, wahan bhi `400` lagaya (upar Step 16 ke point 3 me).
+
+
+## Roadmap: Aage kya-kya develop karna hai (TODO list)
+
+Ye section "future plan" hai. Jo cheez ho jaaye, uska checkbox `[x]` karke upar ke steps me uski entry (kya, kyu, kaise) likhni hai.
+
+### Ab tak kya ban chuka hai (quick snapshot)
+
+| Area | Done |
+|---|---|
+| Auth | `POST /api/auth/register`, `login`, `logout` |
+| User | `GET /api/me` |
+| Account | `POST /api/accounts`, `GET /api/accounts` (list), `GET /api/accounts/balance` |
+| Transaction | `POST /api/transactions` (transfer), `POST /api/transactions/system/initial-funds` |
+| Common | `sendResponse` helper, auth + system user middleware, MongoDB session transactions |
+
+### Priority order (suggested)
+
+1. [ ] Amount validation (live security hole, neeche Section A)
+2. [ ] `GET /api/transactions` (history + pagination)
+3. [ ] `GET /api/accounts/statement`
+4. [ ] Account freeze / close
+5. [ ] Transaction revert
+6. [ ] Password change + forgot password
+7. [ ] Rate limiting, global error handler, tests, docs
+
+Is order ka reason: pehle security hole band ho, phir history dekhna, phir ledger ke advanced kaam (revert) jisme sabse zyada seekhne ko milega.
+
+---
+
+### Section A: Pehle fix karne wali cheezein (bugs / security)
+
+#### A1. Amount validation (sabse zaroori)
+
+- [ ] **Problem:** Abhi `amount` pe sirf "present hai ya nahi" check hai (`!amount`). Isliye:
+  - **Negative amount** bhejne par sender ka DEBIT negative ho jaata hai, yaani sender ka balance **badh jaata hai** aur receiver ka ghat jaata hai (ulta paisa nikaal sakte hain).
+  - `"abc"`, `NaN`, `Infinity` jaisi values.
+  - `0` ko `!amount` pakad leta hai, par `"0"` (string) ya `0.0000001` nahi.
+  - Bahut zyada decimals (`10.123456`) se floating point galtiyan.
+- [ ] **Kya karna hai:**
+  - `typeof amount === 'number'`, `Number.isFinite(amount)`, `amount > 0`.
+  - Max limit (jaise single transfer pe 1,00,000) aur max 2 decimal places.
+  - Dono controllers (`createTransactionController`, `createInitialFundsTransactionController`) me.
+  - Better: ledger me amount **paise (integer)** me store karo (`10.50` -> `1050`), kyunki `Number` float me paise ka hisaab galat ho sakta hai.
+- [ ] **Seekhoge:** input validation, floating point problem, money ko integer me kaise rakhte hain.
+
+#### A2. Self transfer block
+
+- [ ] `fromAccount` aur `toAccount` same ho to `400` ("Cannot transfer to your own account"). Abhi aisa transfer chal jaata hai.
+
+#### A3. Transfer me race condition (double spend)
+
+- [ ] **Problem:** Balance check (step 5) aur ledger write (step 6-9) alag-alag hain. Same user do transfer **ek saath** bheje to dono balance check pass kar sakte hain aur balance negative ho sakta hai.
+- [ ] **Kya karna hai:** balance check ko bhi session ke andar karo, aur account document pe write lock lo (jaise account me ek `version`/`updatedAt` field update karke), taaki Mongo transaction conflict de aur ek retry/fail ho.
+- [ ] **Seekhoge:** concurrency, write conflict, optimistic locking. Banking me ye sabse important topic hai.
+
+#### A4. Idempotency key ka race
+
+- [ ] **Abhi kya hai:** `transaction.model.js` me `idempotencyKey` pe `unique: true` hai, to DB level pe duplicate transaction ban nahi sakti. Ye achha hai.
+- [ ] **Problem:** do request same `idempotencyKey` se **ek saath** aayein to dono `findOne` check pass kar leti hain. Dusri request `create` pe duplicate key error (`code 11000`) khaati hai, jo abhi generic `500 Failed to create transaction` ban jaata hai.
+- [ ] **Kya karna hai:** transfer ke `catch` me `error.code === 11000` pakdo, aur `409` (ya existing transaction ka status) bhejo. Auth controller me register me aisa pehle se kiya hai (E11000 handle).
+
+#### A5. Chhote cleanups
+
+- [ ] `createTransactionController` me `currentUser` ab use hota hai, par baaki unused variables / imports check karo.
+- [ ] Failed transaction par status `FAILED` set karna: abhi error aaye to rollback ho jaata hai par koi `FAILED` record nahi bachta. Audit ke liye bahar (session ke bahar) ek `FAILED` record rakhna achha hai.
+- [ ] `register` me response bhejne ke baad `await sendRegistrationEmail(...)` hota hai. Email fail ho to `catch` me jaake dobara response bhejne ki koshish hoti hai (`ERR_HTTP_HEADERS_SENT`). Email ko try/catch me alag karo.
+- [ ] `/api/accounts` list me abhi pagination nahi hai (Section B1 jaisa add karo).
+
+---
+
+### Section B: Transaction aur ledger APIs
+
+#### B1. `GET /api/transactions` (transaction history)
+
+- [ ] **Auth:** `authMiddleware`
+- [ ] **Query params:** `page` (default 1), `limit` (default 10, max 50), `status` (optional), `type` (`sent` / `received` / all), `from` / `to` (date range)
+- [ ] **Logic:**
+  - Logged in user ka account nikalo.
+  - Filter: `{ $or: [{ fromAccount: id }, { toAccount: id }] }`.
+  - `sort({ createdAt: -1 })`, `skip((page-1) * limit)`, `limit(limit)`.
+  - Har item me `direction: 'SENT' | 'RECEIVED'` add karo (user ke account ke hisaab se).
+  - `populate` se dusre account ke user ka name.
+- [ ] **Response:** `{ transactions: [...], pagination: { page, limit, total, totalPages } }`
+- [ ] **Seekhoge:** pagination, `$or`, `countDocuments`, sorting, populate, query params validate karna.
+- [ ] **Index:** `fromAccount + createdAt` aur `toAccount + createdAt` pe compound index (fast list ke liye).
+
+#### B2. `GET /api/transactions/:id` (ek transaction ki detail)
+
+- [ ] **Auth:** `authMiddleware`
+- [ ] **Logic:** transaction fetch karo, aur check karo ki logged in user ka account `fromAccount` ya `toAccount` hai. Nahi hai to `403` (ya `404`, taaki pata na chale ki id exist karti hai).
+- [ ] **Edge cases:** invalid ObjectId (`400`), transaction nahi mila (`404`).
+- [ ] **Seekhoge:** **ownership / authorization check** (authentication aur authorization me fark), `mongoose.isValidObjectId`.
+
+#### B3. `GET /api/accounts/statement` (account statement)
+
+- [ ] **Auth:** `authMiddleware`
+- [ ] **Query params:** `from`, `to` (date range), `page`, `limit`
+- [ ] **Logic:** ledger collection se us account ki entries (`type`, `amount`, `transaction`, date) nikalo, date se sort karo, aur har entry ke baad **running balance** dikhao (aggregation `$setWindowFields` ya JS me cumulative sum).
+- [ ] **Response:** opening balance, entries list, closing balance.
+- [ ] **Note:** abhi ledger schema me `createdAt` nahi hai (`timestamps` option nahi laga). Isliye pehle ledger schema me `{ timestamps: true }` add karna padega (immutable fields ke saath ye safe hai).
+- [ ] **Seekhoge:** MongoDB aggregation pipeline, window functions, accounting statement ka concept.
+
+#### B4. `POST /api/transactions/:id/revert` (transaction ulti karna)
+
+- [ ] **Auth:** system user / admin (normal user nahi)
+- [ ] **Logic (ek session me):**
+  - Original transaction `COMPLETED` honi chahiye aur pehle revert nahi hui honi chahiye.
+  - Nayi transaction banao (`toAccount` -> `fromAccount`), uske naye DEBIT/CREDIT ledger entries.
+  - Original ki ledger entries **delete / edit nahi** karni (ledger immutable hai, ye uska point hai).
+  - Original ka status `REVERTED`, aur nayi me `revertOf: originalId` field.
+- [ ] **Edge cases:** receiver ka balance kam ho gaya ho (insufficient), account frozen ho.
+- [ ] **Seekhoge:** reversal entries (accounting me delete nahi karte, ulti entry daalte hain), immutability ka real use.
+
+#### B5. `GET /api/transactions/by-key/:idempotencyKey`
+
+- [ ] Client ko apni request ka result dobara dekhna ho (network timeout ke baad) to idempotency key se transaction status. Idempotency ka practical use.
+
+#### B6. Transaction email notification
+
+- [ ] Transfer `COMPLETED` hone par sender ko "debited" aur receiver ko "credited" email (tumhari `email.service.js` ready hai).
+- [ ] Email session commit ke **baad** bhejo, aur email fail hone par transfer fail na ho (try/catch alag).
+- [ ] Better: queue (BullMQ + Redis) se bhejo. Abhi seedha bhi chalega.
+
+---
+
+### Section C: Account management APIs
+
+#### C1. `PATCH /api/accounts/status` (freeze / close)
+
+- [ ] **Auth:** user (apna account `CLOSED` kar sake), admin/system (`FROZEN` kar sake)
+- [ ] **Body:** `{ status: 'FROZEN' | 'CLOSED' | 'ACTIVE' }`
+- [ ] **Rules:**
+  - Allowed transitions: `ACTIVE -> FROZEN`, `FROZEN -> ACTIVE`, `ACTIVE/FROZEN -> CLOSED`. `CLOSED` se wapas nahi.
+  - `CLOSED` karne se pehle balance `0` hona chahiye.
+  - Frozen / closed account se transfer block (Step 4 ka check pehle se hai).
+- [ ] **Seekhoge:** state machine (allowed transitions), role-based permission.
+
+#### C2. `GET /api/accounts/:accountId`
+
+- [ ] Kisi ek account ki basic info. Apna ho to poori info, dusre ka ho to sirf `name` (privacy).
+- [ ] **Dhyaan:** `/balance` aur `/:accountId` dono hon to `/balance` ko **upar** define karo, warna `balance` ko `:accountId` samajh lega.
+
+#### C3. `GET /api/accounts/lookup?email=...`
+
+- [ ] Receiver ko email se dhoondhna, taaki transfer se pehle confirm ho ("Rishabh ko bhej rahe ho?"). Sirf `accountId` aur `name` return karo, email / balance nahi.
+- [ ] Rate limit zaroori (warna kisi ke email ki list nikaali ja sakti hai).
+
+#### C4. Multiple accounts per user (optional, bada change)
+
+- [ ] Abhi ek user = ek account. Savings / current type ke multiple accounts allow karna ho to `accountType` field, `GET /api/accounts/mine`, aur balance/transfer APIs me `accountId` lena padega (`/api/accounts/:accountId/balance`).
+
+#### C5. Account list me pagination + search
+
+- [ ] `GET /api/accounts?page=&limit=&search=` (name se search).
+
+---
+
+### Section D: User aur auth APIs
+
+#### D1. `PATCH /api/me` (profile update)
+
+- [ ] Sirf allowed fields (`name`). `email`, `role`, `systemUser`, `password` is route se **nahi** badalne chahiye (whitelisting). Mass assignment se bachne ke liye `req.body` seedha `update` me mat daalo.
+
+#### D2. `PATCH /api/me/password` (password change)
+
+- [ ] **Body:** `{ currentPassword, newPassword }`
+- [ ] Purana password `comparePassword` se verify karo, naya password schema ke rules (min 8) se. `password` me `select: false` hai, to `.select('+password')` lagao.
+- [ ] Password badalne ke baad purane tokens invalid karna (D5 se connect).
+
+#### D3. `POST /api/auth/forgot-password` aur `POST /api/auth/reset-password`
+
+- [ ] **Forgot:** email lo, random token banao (`crypto.randomBytes`), uska **hash** DB me expiry (15 min) ke saath rakho, aur reset link email karo. Email exist kare ya na kare, response same do (user enumeration se bachne ke liye).
+- [ ] **Reset:** token + new password lo, hash match + expiry check, password update, token delete.
+
+#### D4. Email verification
+
+- [ ] Register ke baad verify link email, `isEmailVerified` field, unverified user ko transfer block.
+
+#### D5. Proper logout / token invalidation
+
+- [ ] **Problem:** abhi logout sirf cookie clear karta hai. Header se bheja hua token expire (3 din) tak chalta hai.
+- [ ] **Options:** (a) token blacklist (Redis me token + expiry, `authMiddleware` me check), (b) short-lived access token (15 min) + refresh token (DB me, rotate hota hai).
+- [ ] **Seekhoge:** JWT ki limits, refresh token flow. Bada aur important topic hai.
+
+#### D6. `DELETE /api/me` (account delete / deactivate)
+
+- [ ] Soft delete: `isActive: false` (field pehle se hai). Balance `0` hona chahiye, account `CLOSED` karo. Login me `isActive` check.
+
+#### D7. Login me `isActive` check
+
+- [ ] Abhi disabled user (`isActive: false`) bhi login kar sakta hai. `userLoginController` aur `authMiddleware` me check lagao.
+
+#### D8. Role based access (admin)
+
+- [ ] `adminMiddleware` (`role === 'admin'`). Admin APIs:
+  - `GET /api/admin/users` (list + pagination)
+  - `GET /api/admin/accounts`
+  - `GET /api/admin/transactions`
+  - `PATCH /api/admin/accounts/:id/status` (freeze)
+- [ ] Abhi system user alag concept hai (bank), admin alag (staff). Dono ko mix mat karo.
+
+---
+
+### Section E: Quality, safety aur production readiness
+
+| Cheez | Kya karna hai | Kaise |
+|---|---|---|
+| **Input validation** | Har route ka body/query validate | `zod` ya `joi`, ek reusable `validate(schema)` middleware |
+| **Global error handler** | `catch` ke 500 blocks ek jagah | `ApiError` class + last me `app.use((err, req, res, next) => ...)`, `sendResponse` ke saath |
+| **Rate limiting** | Login, register, transfer, forgot-password pe | `express-rate-limit` |
+| **Security headers + CORS** | Basic hardening | `helmet`, `cors` (allowed origin config) |
+| **Logging** | `console.log` ki jagah proper logs | `pino` ya `winston`, request id |
+| **Env validation** | Server start pe `.env` check | `JWT_SECRET`, `MONGO_URI` missing ho to fail fast |
+| **Tests** | Transfer flow ke automated tests | `jest` + `supertest` + `mongodb-memory-server` (replica set mode) |
+| **API docs** | Swagger | `swagger-ui-express` + OpenAPI file |
+| **Request collection** | `request.http` ko complete rakhna | Har naye API ka example add karo |
+| **Seed script** | System user + test data ek command me | `scripts/seed.js` (abhi system user DB me manually banana padta hai) |
+| **Docker compose** | Mongo replica set + app ek command me | `docker-compose.yml` (abhi `mongo-rs` manually chalaya tha) |
+| **Prettier / ESLint** | Code style consistency | ESLint add karo (Prettier pehle se hai) |
+| **Money as integer** | Floating point se bachna | Amount paise me store karo (A1 dekho) |
+| **DB indexes review** | Slow queries se bachna | `idempotencyKey` unique, ledger `account` + `createdAt`, transaction `fromAccount`/`toAccount` |
+
+### Section F: Advanced / stretch goals (jab upar ka sab ho jaaye)
+
+- [ ] **Transaction limits:** daily transfer limit per account, per-transaction max.
+- [ ] **Scheduled / recurring transfers:** cron job (`node-cron`) ya queue.
+- [ ] **Beneficiaries (saved payees):** `POST/GET/DELETE /api/beneficiaries`.
+- [ ] **Transaction PIN:** transfer se pehle 4-6 digit PIN verify (hashed).
+- [ ] **Audit log:** kaun kya kab kiya (admin actions, freeze, revert) ka alag collection.
+- [ ] **Reconciliation job:** roz check kare ki saare ledger entries ka total (CREDIT - DEBIT) `0` hai ya nahi (double-entry ka rule). Mismatch ho to alert.
+- [ ] **Multi currency:** exchange rate, alag currency ke accounts ke beech transfer.
+- [ ] **Postgres + Prisma/Drizzle migration:** ledger jaise kaam ke liye relational DB (ACID, constraints) zyada safe hai. Seekhne ke liye same project ko migrate karke dekho.
+- [ ] **Frontend (React):** login, dashboard (balance), transfer form, history table. Ye API ko end-to-end test karne ka bhi achha tareeka hai.
+
+### Har naye feature par yaad rakhna (workflow)
+
+1. Route + controller banao, `sendResponse` use karo.
+2. Input validate karo, aur ownership / role check karo.
+3. Kuch bhi do ya zyada collections me likhna ho to MongoDB session (transaction) me likho.
+4. `request.http` me example add karo.
+5. Readme me naya Step likho (kya, kyu, kaise) aur is roadmap me checkbox `[x]` karo.
+6. Commit se pehle readme update, phir commit + push.
