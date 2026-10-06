@@ -691,7 +691,7 @@ Router.post('/', authMiddleware, createTransactionController);
 
 ### Step 1: Request validation
 
-`fromAccount`, `toAccount`, `amount`, `idempotencyKey` me se koi missing ho to `400`.
+`fromAccount`, `toAccount`, `amount`, `idempotencyKey` me se koi missing ho to `400`. (Update: `fromAccount` ab body se nahi aata, Step 16 dekho. Ab body me `toAccount`, `amount`, `idempotencyKey` chahiye.)
 
 ### Step 2: Idempotency key check
 
@@ -1020,3 +1020,87 @@ Notes:
 - Refactor ek script se kiya (message/status nikalke baaki fields extra me daale). Phir auth me validation errors wala multi-line `message` ko `const message = ...` me nikalke manually theek kiya.
 - `res.cookie(...)` / `res.clearCookie(...)` jaisi calls waise hi hain, kyunki wo JSON response nahi hain.
 - Future idea: error ke liye `ApiError` class + global error middleware, taaki `catch` ke 500 blocks bhi ek jagah aa jaayein.
+
+
+## Step 16: Accounts list API, `/api/me`, aur transfer me `fromAccount` auto
+
+### 1. `GET /api/accounts` (list of accounts)
+
+Saare **ACTIVE** accounts ki list (account id + user ka name), lekin logged in user ka apna account aur **system users** ke accounts list me nahi aate. Transfer ke time "kisko bhejna hai" ki list dikhane ke kaam aati hai.
+
+Route (`account.routes.js`): `router.get('/', authMiddleware, listAccountController);`
+
+```js
+// 1. system users ki ids
+const systemUsers = await userModel.find({ systemUser: true }).select('_id').lean();
+const systemUserIds = systemUsers.map((user) => user._id);
+
+// 2. active accounts, apna + system users ke accounts chhodke
+const accounts = await accountModel
+    .find({
+        status: 'ACTIVE',
+        user: { $nin: [currentUser._id, ...systemUserIds] },
+    })
+    .select('_id user')
+    .populate('user', 'name')
+    .lean();
+
+const accountList = accounts.map((account) => ({
+    accountId: account._id,
+    name: account.user?.name,
+}));
+```
+
+- `$nin` = "in me nahi". Apni id + system users ki ids ek saath exclude hoti hain.
+- `systemUser` **user** model me hai (account me nahi), isliye pehle users se unki ids nikaali. `select: false` hone par bhi filter me use karne ke liye `.select('+systemUser')` nahi chahiye, wo sirf value padhne ke liye chahiye.
+- `.select('_id user')`: sirf zaroori fields. `.populate('user', 'name')`: user id ki jagah uska name (password jaise fields kabhi nahi aate).
+- `.lean()`: Mongoose document ki jagah plain JS object deta hai. Fast aur halka hai. Read-only list ke liye theek hai, par `.save()` ya custom methods (`getBalance()`) wahan nahi milte.
+- `account.user?.name`: `?.` isliye ki user delete ho gaya ho to populate `null` deta hai aur crash na ho.
+
+Response:
+
+```json
+{ "message": "...", "status": "success", "accounts": [{ "accountId": "...", "name": "Rishabh" }] }
+```
+
+### 2. `GET /api/me` (logged in user ki info)
+
+Naye files:
+
+- `src/controllers/user.controller.js` -> `getMeController`
+- `src/routes/user.routes.js` -> `router.get('/', authMiddleware, getMeController)`
+
+`src/app.js` me mount kiya:
+
+```js
+const userRouter = require('./routes/user.routes');
+app.use('/api/me', userRouter);
+```
+
+- `authMiddleware` pehle hi `req.user` set kar deta hai, to user ke liye extra query nahi lagti.
+- User ke fields **explicitly list** kiye (`id, name, email, role, isActive, createdAt`), taaki password / `systemUser` galti se leak na ho.
+- Extra: user ka `account` (`accountId, status, currency`) bhi aata hai, kyunki transfer ke liye apni `accountId` chahiye. Account na ho to `null`.
+
+```json
+{
+  "user": { "id": "...", "name": "...", "email": "...", "role": "user", "isActive": true, "createdAt": "..." },
+  "account": { "accountId": "...", "status": "ACTIVE", "currency": "INR" }
+}
+```
+
+Token ke bina `401 Unauthorized access, token is missing` aata hai (test kiya).
+
+### 3. Transfer me `fromAccount` ab body se nahi
+
+`POST /api/transactions` me pehle client `fromAccount` bhejta tha, yaani koi bhi kisi aur ke account se paisa bhej sakta tha. Ab sender ka account **logged in user se** nikalta hai:
+
+```js
+const currentUserAccount = await accountModel.findOne({ user: currentUser._id });
+const fromAccount = currentUserAccount._id;
+
+const { toAccount, amount, idempotencyKey } = req.body ?? {};
+```
+
+- Body ab: `toAccount`, `amount`, `idempotencyKey`.
+- Security improve hui: user sirf apne account se paisa bhej sakta hai.
+- Known issue: user ka account na ho to `currentUserAccount` `null` hota hai aur `._id` pe TypeError aata hai. Wo `catch` me jaake `500` deta hai. Isme `400` ("account not found") ka check lagana baaki hai.

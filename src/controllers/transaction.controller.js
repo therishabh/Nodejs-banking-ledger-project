@@ -27,17 +27,23 @@ async function createTransactionController(req, res) {
     try {
         const currentUser = req.user;
 
+        const currentUserAccount = await accountModel.findOne({
+            user: currentUser._id
+        });
+
+        const fromAccount = currentUserAccount._id;
+
         /**
          * 1. Validate the request
          * Check if all required fields (fromAccount, toAccount, amount, idempotencyKey) are present in the request body.
          * If any of these fields are missing, return a 400 error response with a message indicating the missing fields.
          */
         // Request body se transaction ki details nikaalo (body na ho to empty object)
-        const { fromAccount, toAccount, amount, idempotencyKey } = req.body ?? {};
+        const { toAccount, amount, idempotencyKey } = req.body ?? {};
 
         // Saare required fields hone zaroori hain, warna 400 bhej do
-        if (!fromAccount || !toAccount || !amount || !idempotencyKey) {
-            return sendResponse(res, 400, 'Missing required fields (fromAccount, toAccount, amount, idempotencyKey)');
+        if (!toAccount || !amount || !idempotencyKey) {
+            return sendResponse(res, 400, 'Missing required fields ( toAccount, amount, idempotencyKey)');
         }
 
         /** 
