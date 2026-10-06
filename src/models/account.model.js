@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const LedgerModel = require('./ledger.model');
 
 const accountSchema = new mongoose.Schema(
     {
@@ -30,6 +31,44 @@ const accountSchema = new mongoose.Schema(
 // user ke accounts (aur status ke saath filter) fast nikalne ke liye.
 // Ye index `user` akele ki query bhi cover karta hai, isliye alag se user par index nahi lagaya.
 accountSchema.index({ user: 1, status: 1 });
+
+accountSchema.methods.getBalance = async function () {
+    const accountId = this._id;
+    const balanceData = await LedgerModel.aggregate([
+        { $match: { account: accountId } },
+        {
+            $group: {
+                _id: null,
+                creditBalance: {
+                    $sum: {
+                        $cond: [
+                            { $eq: ['$type', 'CREDIT'] },
+                            '$amount',
+                            0
+                        ]
+                    }
+                },
+                debitBalance: {
+                    $sum: {
+                        $cond: [
+                            { $eq: ['$type', 'DEBIT'] },
+                            '$amount',
+                            0
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            $project: {
+                _id: null,
+                balance: { $subtract: ['$creditBalance', '$debitBalance'] }
+            }
+        }
+    ]);
+
+    return balanceData.length > 0 ? balanceData[0].balance : 0;
+}
 
 const accountModel = mongoose.model('account', accountSchema);
 

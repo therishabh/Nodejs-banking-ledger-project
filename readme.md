@@ -653,9 +653,9 @@ ledgerSchema.pre('deleteOne', preventLedgerModification);
 `.vscode/settings.json` me `[javascript]` ke liye alag `defaultFormatter` (`vscode.typescript-language-features`) daala.
 
 
-## Step 11: Create Transaction API (WIP: abhi validation tak)
+## Step 11: Create Transaction API (WIP: success response baaki)
 
-`POST /api/transactions` ka route + controller banaya. Abhi **sirf starting ke 4 steps** ho paye hain, paisa move karne wala part (ledger entries) aage aayega.
+`POST /api/transactions` ka route + controller banaya. Validation se leke ledger entries + commit tak ho gaya hai, sirf success response (step 10) baaki hai.
 
 Naye files:
 
@@ -687,7 +687,7 @@ Router.post('/', authMiddleware, createTransactionController);
 10. Success response
 11. Error handling
 
-**Abhi 1-4 + error handling (step 11) done hain. 5-10 baaki hain.**
+**Steps 1-9 + error handling (step 11) done hain. Sirf step 10 (success response) baaki hai.**
 
 ### Step 1: Request validation
 
@@ -720,7 +720,71 @@ Dono me se koi na mile to `400` (`One or both accounts not found`).
 
 Sender ya receiver me se koi bhi `ACTIVE` nahi hai to `400` (`One or both accounts are not active`).
 
+### Step 5: Sender ka balance (ledger se)
+
+Balance kahin store nahi karte, ledger se **derive** karte hain. `account.model.js` me instance method `getBalance()` banaya:
+
+```js
+accountSchema.methods.getBalance = async function () {
+    const balanceData = await LedgerModel.aggregate([
+        { $match: { account: this._id } },
+        { $group: {
+            _id: null,
+            creditBalance: { $sum: { $cond: [{ $eq: ['$type', 'CREDIT'] }, '$amount', 0] } },
+            debitBalance:  { $sum: { $cond: [{ $eq: ['$type', 'DEBIT'] },  '$amount', 0] } },
+        } },
+        { $project: { _id: 0, balance: { $subtract: ['$creditBalance', '$debitBalance'] } } },
+    ]);
+    return balanceData.length > 0 ? balanceData[0].balance : 0; // entries nahi to balance 0
+};
+```
+
+- Balance = total CREDIT - total DEBIT.
+- Controller me `senderAccountBalance < amount` ho to `400` (insufficient balance).
+- Fix: pehle `$match` me `accountId` likha tha, jabki ledger me field ka naam `account` hai. Isse balance hamesha 0 aata. Ab `account` use hota hai.
+
+### Steps 6-9: Atomic write (MongoDB session)
+
+Transaction + 2 ledger entries ek hi **session** me likhte hain, taaki ya to sab save ho ya kuch bhi nahi.
+
+```js
+session = await mongoose.startSession();
+session.startTransaction();
+
+// (a) PENDING transaction
+const [transaction] = await transactionModel.create([{ fromAccount, toAccount, amount, idempotencyKey, status: 'PENDING' }], { session });
+// (b) sender par DEBIT, (c) receiver par CREDIT
+await ledgerModel.create([{ account: fromAccount, transaction: transaction._id, type: 'DEBIT', amount }], { session });
+await ledgerModel.create([{ account: toAccount, transaction: transaction._id, type: 'CREDIT', amount }], { session });
+// (d) COMPLETED + (e) commit
+transaction.status = 'COMPLETED';
+await transaction.save({ session });
+await session.commitTransaction();
+```
+
+Important baatein:
+
+- `create()` me `session` option tabhi lagta hai jab **array** pass karo (`create([{...}], { session })`). Object pass karne par `{ session }` ko doosra document maan leta hai. Isliye `const [transaction] = ...`.
+- Error aaye to `catch` me rollback:
+
+```js
+if (session?.inTransaction()) await session.abortTransaction();
+```
+
+- `finally` me `session?.endSession()` taaki success/error dono me session release ho. `session` ko `try` ke bahar `let session = null` se declare kiya taaki catch/finally me mile.
+- `require('mongoose')` controller me missing tha, wo add kiya.
+- Note: MongoDB transactions ke liye **replica set** chahiye. Standalone local MongoDB par error aa sakta hai.
+
+### Comments
+
+Step 6 wale block me Hinglish comments add kiye (a-e ka flow), taaki code padhke samajh aaye.
+
 ### Baaki kaam
 
-- Step 5-10 controller me abhi implement nahi hain, isliye valid request par abhi response nahi jaata (request hang hogi).
-- `currentUser` (`req.user`) abhi use nahi hua, aur `ledgerModel` import bhi abhi unused hai. Dono aage ke steps me kaam aayenge.
+- Step 10: success response (`201` + transaction details) abhi nahi bheja, isliye valid request par response nahi jaata (request hang hogi).
+- `module.exports = { createTransactionController }` controller file me abhi nahi hai.
+- `currentUser` (`req.user`) abhi use nahi hua. Aage ke steps me kaam aayega.
+
+### Side note: ORM
+
+Ledger/transactions jaise kaam ke liye Postgres (ACID, constraints) zyada safe hai. Future me migrate karna ho to **Prisma** ya **Drizzle** achhe options hain. Abhi Mongoose hi chal raha hai.
