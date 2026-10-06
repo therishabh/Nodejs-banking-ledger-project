@@ -65,7 +65,32 @@ async function listAccountController(req, res) {
     });
 }
 
+/**
+ * - GET /api/accounts/balance
+ * - Logged in user ke account ka current balance (ledger se derive hota hai: CREDIT - DEBIT)
+ * - protected route
+ */
+async function getBalanceController(req, res) {
+    const currentUser = req.user;
+
+    const currentAccount = await accountModel.findOne({ user: currentUser._id });
+
+    // User ne abhi account create nahi kiya -> null par .getBalance() call karne se crash hota
+    if (!currentAccount) {
+        return sendResponse(res, 404, 'Account not found for this user, please create an account first');
+    }
+
+    const balance = await currentAccount.getBalance();
+
+    return sendResponse(res, 200, 'Account balance has been successfully fetched', {
+        accountId: currentAccount._id,
+        balance,
+        currency: currentAccount.currency,
+    });
+}
+
 module.exports = {
     createAccountController,
-    listAccountController
+    listAccountController,
+    getBalanceController,
 };

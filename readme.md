@@ -1103,4 +1103,70 @@ const { toAccount, amount, idempotencyKey } = req.body ?? {};
 
 - Body ab: `toAccount`, `amount`, `idempotencyKey`.
 - Security improve hui: user sirf apne account se paisa bhej sakta hai.
-- Known issue: user ka account na ho to `currentUserAccount` `null` hota hai aur `._id` pe TypeError aata hai. Wo `catch` me jaake `500` deta hai. Isme `400` ("account not found") ka check lagana baaki hai.
+- User ka account na ho to `currentUserAccount` `null` hota hai aur `._id` pe TypeError aata (generic `500`). Isliye (Step 17 me fix kiya) ab `400` milta hai:
+
+```js
+if (!currentUserAccount) {
+    return sendResponse(res, 400, 'Account not found for this user, please create an account first');
+}
+```
+
+
+## Step 17: Balance API (`GET /api/accounts/balance`)
+
+Logged in user apne account ka current balance dekh sake, iske liye API.
+
+### Path kaisa chuna
+
+`GET /api/accounts/balance`
+
+- Balance **account** ki cheez hai, isliye `/api/accounts` ke neeche aaya (create aur list yahin hain).
+- Ek user ka ek hi account hai, to URL me account id nahi chahiye. Account `req.user` se mil jaata hai (jaise `/api/me`).
+- `GET` hai kyunki sirf padhna hai.
+- Alternative: `/api/accounts/:accountId/balance` (REST style), par tab ownership check bhi chahiye aur ye tab sahi hai jab ek user ke multiple accounts hon.
+- Agar baad me `GET /api/accounts/:accountId` jaisa route aaye, to `/balance` ko **uske upar** define karna, warna Express `balance` ko `:accountId` samajh lega.
+
+Route (`account.routes.js`):
+
+```js
+router.get('/balance', authMiddleware, getBalanceController);
+```
+
+### Controller
+
+Naya logic nahi likha, `getBalance()` (Step 5: CREDIT minus DEBIT) hi use kiya:
+
+```js
+async function getBalanceController(req, res) {
+    const currentUser = req.user;
+
+    const currentAccount = await accountModel.findOne({ user: currentUser._id });
+
+    // account na ho to null par .getBalance() call karne se crash hota
+    if (!currentAccount) {
+        return sendResponse(res, 404, 'Account not found for this user, please create an account first');
+    }
+
+    const balance = await currentAccount.getBalance();
+
+    return sendResponse(res, 200, 'Account balance has been successfully fetched', {
+        accountId: currentAccount._id,
+        balance,
+        currency: currentAccount.currency,
+    });
+}
+```
+
+Response:
+
+```json
+{ "message": "...", "status": "success", "accountId": "...", "balance": 1500, "currency": "INR" }
+```
+
+### Code review me jo improve kiya
+
+- **Null crash:** account na ho to pehle `null.getBalance()` pe crash hota. Ab `404`.
+- **Debug `console.log`** (`console.log('currentAccount', ...)`) hata diya, wo har request pe account document print karta tha.
+- `accountId` response me add kiya, `balance: balance` ko short `balance` kiya, aur doc comment daala.
+- `try/catch` nahi lagaya, kyunki Express 5 async errors ko khud error handler tak bhej deta hai.
+- Transfer controller (`createTransactionController`) me wahi null bug tha, wahan bhi `400` lagaya (upar Step 16 ke point 3 me).

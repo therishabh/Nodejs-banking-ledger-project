@@ -27,9 +27,13 @@ async function createTransactionController(req, res) {
     try {
         const currentUser = req.user;
 
-        const currentUserAccount = await accountModel.findOne({
-            user: currentUser._id
-        });
+        // Sender ka account body se nahi, logged in user se nikalte hain (koi aur ke account se paisa na bheje)
+        const currentUserAccount = await accountModel.findOne({ user: currentUser._id });
+
+        // Account hi nahi bana to ._id pe crash hota aur generic 500 jaata, isliye clear 400 bhejo
+        if (!currentUserAccount) {
+            return sendResponse(res, 400, 'Account not found for this user, please create an account first');
+        }
 
         const fromAccount = currentUserAccount._id;
 

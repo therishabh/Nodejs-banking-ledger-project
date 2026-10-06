@@ -3,6 +3,7 @@ const { authMiddleware } = require('../middleware/auth.middleware');
 const {
     createAccountController,
     listAccountController,
+    getBalanceController,
 } = require('../controllers/account.controller');
 
 const router = express.Router();
@@ -14,5 +15,6 @@ const router = express.Router();
  */
 router.post('/', authMiddleware, createAccountController);
 router.get('/', authMiddleware, listAccountController);
+router.get('/balance', authMiddleware, getBalanceController);
 
 module.exports = router;
