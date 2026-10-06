@@ -1,6 +1,7 @@
 const accountModel = require('./../models/account.model');
 const userModel = require('./../models/user.model');
 const { sendResponse } = require('../utils/response');
+const ApiError = require('../utils/ApiError');
 
 async function createAccountController(req, res) {
     const currentUser = req.user;
@@ -13,7 +14,7 @@ async function createAccountController(req, res) {
     })
 
     if (isAccountExist) {
-        return sendResponse(res, 400, "Account already created");
+        throw new ApiError(400, 'Account already created');
     }
 
     const account = await accountModel.create({
@@ -77,7 +78,7 @@ async function getBalanceController(req, res) {
 
     // User ne abhi account create nahi kiya -> null par .getBalance() call karne se crash hota
     if (!currentAccount) {
-        return sendResponse(res, 404, 'Account not found for this user, please create an account first');
+        throw new ApiError(404, 'Account not found for this user, please create an account first');
     }
 
     const balance = await currentAccount.getBalance();

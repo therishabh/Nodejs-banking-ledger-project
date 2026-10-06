@@ -3,6 +3,7 @@ const transactionModel = require('../models/transaction.model');
 const ledgerModel = require('../models/ledger.model');
 const accountModel = require('../models/account.model');
 const { sendResponse } = require('../utils/response');
+const ApiError = require('../utils/ApiError');
 const userModel = require('../models/user.model');
 
 /**
@@ -32,7 +33,7 @@ async function createTransactionController(req, res) {
 
         // Account hi nahi bana to ._id pe crash hota aur generic 500 jaata, isliye clear 400 bhejo
         if (!currentUserAccount) {
-            return sendResponse(res, 400, 'Account not found for this user, please create an account first');
+            throw new ApiError(400, 'Account not found for this user, please create an account first');
         }
 
         const fromAccount = currentUserAccount._id;
@@ -47,7 +48,7 @@ async function createTransactionController(req, res) {
 
         // Saare required fields hone zaroori hain, warna 400 bhej do
         if (!toAccount || !amount || !idempotencyKey) {
-            return sendResponse(res, 400, 'Missing required fields ( toAccount, amount, idempotencyKey)');
+            throw new ApiError(400, 'Missing required fields ( toAccount, amount, idempotencyKey)');
         }
 
         /** 
@@ -71,15 +72,15 @@ async function createTransactionController(req, res) {
 
             // Pehle fail ho chuki hai -> success nahi bol sakte, 409 + status 'failed'
             if (isTransactionExists.status === 'FAILED') {
-                return sendResponse(res, 409, 'Transaction with the same idempotency key already exists and has failed');
+                throw new ApiError(409, 'Transaction with the same idempotency key already exists and has failed');
             }
 
             // Revert ho chuki hai -> 409 + status 'failed'
             if (isTransactionExists.status === 'REVERTED') {
-                return sendResponse(res, 409, 'Transaction with the same idempotency key already exists and has been reverted');
+                throw new ApiError(409, 'Transaction with the same idempotency key already exists and has been reverted');
             }
 
-            return sendResponse(res, 409, 'Transaction with the same idempotency key already exists');
+            throw new ApiError(409, 'Transaction with the same idempotency key already exists');
         }
 
         /**
@@ -91,7 +92,7 @@ async function createTransactionController(req, res) {
 
         // Dono me se koi bhi account nahi mila to 400 bhej do
         if (!fromAccountDoc || !toAccountDoc) {
-            return sendResponse(res, 400, 'One or both accounts not found');
+            throw new ApiError(400, 'One or both accounts not found');
         }
 
         /**
@@ -100,7 +101,7 @@ async function createTransactionController(req, res) {
          * 
          */
         if (fromAccountDoc.status !== 'ACTIVE' || toAccountDoc.status !== 'ACTIVE') {
-            return sendResponse(res, 400, 'One or both accounts are not active');
+            throw new ApiError(400, 'One or both accounts are not active');
         }
 
         /**
@@ -110,7 +111,7 @@ async function createTransactionController(req, res) {
          */
         const senderAccountBalance = await fromAccountDoc.getBalance();
         if (senderAccountBalance < amount) {
-            return sendResponse(res, 400, `Insufficient balance in sender account, current balance: ${senderAccountBalance} and required amount: ${amount}`);
+            throw new ApiError(400, `Insufficient balance in sender account, current balance: ${senderAccountBalance} and required amount: ${amount}`);
         }
 
         /**
@@ -173,7 +174,8 @@ async function createTransactionController(req, res) {
             await session.abortTransaction();
         }
 
-        sendResponse(res, 500, 'Failed to create transaction', { error: error.message });
+        // Error khud handle nahi karte, global error handler ko de dete hain (wahi status + message banayega)
+        throw error;
     } finally {
         // Success ho ya error, session hamesha release karo
         session?.endSession();
@@ -191,13 +193,13 @@ async function createInitialFundsTransactionController(req, res) {
 
         // Saare required fields hone zaroori hain, warna 400 bhej do
         if (!toAccount || !amount || !idempotencyKey) {
-            return sendResponse(res, 400, 'Missing required fields (toAccount, amount, idempotencyKey)');
+            throw new ApiError(400, 'Missing required fields (toAccount, amount, idempotencyKey)');
         }
 
         const toUserAccount = await accountModel.findById(toAccount);
 
         if (!toUserAccount) {
-            return sendResponse(res, 400, 'Invalid Account');
+            throw new ApiError(400, 'Invalid Account');
         }
 
         // toAccount system user ka nahi hona chahiye.
@@ -205,7 +207,7 @@ async function createInitialFundsTransactionController(req, res) {
         const toUser = await userModel.findById(toUserAccount.user).select('+systemUser');
 
         if (toUser?.systemUser) {
-            return sendResponse(res, 400, 'toAccount should not be system account');
+            throw new ApiError(400, 'toAccount should not be system account');
         }
 
         // `systemUser` flag user model me hai (account me nahi). systemUserAuthMiddleware pehle hi
@@ -216,7 +218,7 @@ async function createInitialFundsTransactionController(req, res) {
         });
 
         if (!fromUserAccount) {
-            return sendResponse(res, 400, 'Active account not found for system user');
+            throw new ApiError(400, 'Active account not found for system user');
         }
 
         const isTransactionExists = await transactionModel.findOne({ idempotencyKey: idempotencyKey });
@@ -234,15 +236,15 @@ async function createInitialFundsTransactionController(req, res) {
 
             // Pehle fail ho chuki hai -> success nahi bol sakte, 409 + status 'failed'
             if (isTransactionExists.status === 'FAILED') {
-                return sendResponse(res, 409, 'Transaction with the same idempotency key already exists and has failed');
+                throw new ApiError(409, 'Transaction with the same idempotency key already exists and has failed');
             }
 
             // Revert ho chuki hai -> 409 + status 'failed'
             if (isTransactionExists.status === 'REVERTED') {
-                return sendResponse(res, 409, 'Transaction with the same idempotency key already exists and has been reverted');
+                throw new ApiError(409, 'Transaction with the same idempotency key already exists and has been reverted');
             }
 
-            return sendResponse(res, 409, 'Transaction with the same idempotency key already exists');
+            throw new ApiError(409, 'Transaction with the same idempotency key already exists');
         }
 
         session = await mongoose.startSession();
@@ -284,7 +286,8 @@ async function createInitialFundsTransactionController(req, res) {
             await session.abortTransaction();
         }
 
-        sendResponse(res, 500, 'Failed to create transaction', { error: error.message });
+        // Error khud handle nahi karte, global error handler ko de dete hain (wahi status + message banayega)
+        throw error;
     } finally {
         // Success ho ya error, session hamesha release karo
         session?.endSession();

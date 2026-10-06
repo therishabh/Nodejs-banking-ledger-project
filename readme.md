@@ -1172,6 +1172,293 @@ Response:
 - Transfer controller (`createTransactionController`) me wahi null bug tha, wahan bhi `400` lagaya (upar Step 16 ke point 3 me).
 
 
+## Step 18: `ApiError` + Global error handler
+
+### Problem kya thi
+
+Har controller me error ke liye ye pattern baar-baar tha:
+
+```js
+if (!account) {
+    return sendResponse(res, 404, 'Account not found');   // har jagah likho
+}
+...
+} catch (error) {
+    sendResponse(res, 500, 'Failed to create transaction', { error: error.message }); // har controller me try/catch
+}
+```
+
+Dikkatein:
+
+- Har controller me `try/catch` + 400/401/404/500 ke responses copy-paste ho rahe the.
+- Alag-alag jagah error ka format / message alag ho sakta tha (kahin `error.message` leak, kahin nahi).
+- Kuch errors ka koi handler hi nahi tha (jaise tuta hua JSON body, galat ObjectId, duplicate key).
+- `register` me response bhejne ke baad email fail ho to `catch` dobara response bhejne ki koshish karta tha (`ERR_HTTP_HEADERS_SENT`).
+
+### Idea (simple language me)
+
+Error aaye to controller **response nahi bhejega, error `throw` karega**. Ek hi jagah (global error handler) saare errors pakdega, dekhega ki kis type ka hai, aur sahi status code + message ke saath `sendResponse` se bhej dega.
+
+```
+Request -> route -> middleware -> controller
+                                     |  throw new ApiError(404, '...')   (ya koi bhi error)
+                                     v
+                         notFoundHandler (route nahi mila)
+                                     v
+                          errorHandler (final response yahin bante hain)
+```
+
+**Express 5 ki khaas baat:** Express 5 me `async` function (controller/middleware) se `throw` karo ya rejected promise aaye to wo **apne aap** error handler tak pahunch jaata hai. Express 4 me iske liye `express-async-errors` ya har jagah `try/catch + next(err)` chahiye hota tha. Isliye yahan `asyncHandler` wrapper ki zaroorat nahi padi.
+
+### Step 1: `ApiError` class
+
+Naya file: `src/utils/ApiError.js`
+
+```js
+class ApiError extends Error {
+    constructor(statusCode, message, extra = {}) {
+        super(message);
+
+        this.name = 'ApiError';
+        this.statusCode = statusCode;
+        this.extra = extra; // response JSON me message/status ke saath jodne wale fields
+
+        Error.captureStackTrace(this, this.constructor);
+    }
+}
+```
+
+- `ApiError` = jaanbujhkar fail hui request ka error (400, 401, 404, 409...). Ye normal JS `Error` hi hai, bas ek `statusCode` aur optional `extra` ke saath.
+- `extra` me wo fields jaate hain jo response me `message` / `status` ke saath chahiye (jaise `{ status: 'pending' }`).
+- Use:
+
+```js
+throw new ApiError(404, 'Account not found');
+```
+
+### Step 2: Global error handler + 404 handler
+
+Naya file: `src/middleware/error.middleware.js`
+
+**a) `notFoundHandler`**: koi route match na ho to 404:
+
+```js
+function notFoundHandler(req, res, next) {
+    next(new ApiError(404, `Route ${req.method} ${req.originalUrl} not found`));
+}
+```
+
+**b) `errorHandler`**: Express ko batane ke liye ki ye error handler hai, function me **4 arguments** `(err, req, res, next)` hone zaroori hain (chahe `next` use na ho).
+
+```js
+function errorHandler(err, req, res, next) {
+    if (res.headersSent) return next(err); // response ja chuka hai, Express ka default handler sambhale
+
+    let statusCode = 500;
+    let message = 'Something went wrong, please try again later.';
+    let extra = {};
+
+    if (err instanceof ApiError) { statusCode = err.statusCode; message = err.message; extra = err.extra; }
+    else if (err.name === 'ValidationError') { /* 400, saare field messages join */ }
+    else if (err.code === 11000)             { /* 409, Duplicate value for: <field> */ }
+    else if (err.name === 'CastError')       { /* 400, Invalid value for <path> */ }
+    else if (err.name === 'TokenExpiredError') { /* 401, token has expired */ }
+    else if (err.name === 'JsonWebTokenError') { /* 401, token is invalid */ }
+    else if (err.type === 'entity.parse.failed') { /* 400, Invalid JSON in request body */ }
+
+    if (statusCode === 500) {
+        console.error('Unhandled error:', err);                         // server log me poora error
+        if (process.env.NODE_ENV !== 'production') extra = { ...extra, error: err.message }; // client ko sirf dev me
+    }
+
+    return sendResponse(res, statusCode, message, extra);
+}
+```
+
+Kaun sa error kahan se aata hai:
+
+| Error | Kahan se | Response |
+|---|---|---|
+| `ApiError` | humne `throw` kiya | jo status/message diya |
+| `ValidationError` | Mongoose schema (galat email, chhota password) | `400`, saare messages comma se jude |
+| `code 11000` | Mongo unique index (duplicate email / `idempotencyKey`) | `409 Duplicate value for: <field>` |
+| `CastError` | galat format ki id (`"abc"` ObjectId ki jagah) | `400 Invalid value for <path>` |
+| `TokenExpiredError` | `jwt.verify()` expire token | `401 token has expired` |
+| `JsonWebTokenError` | `jwt.verify()` galat token | `401 token is invalid` |
+| `entity.parse.failed` | `express.json()` ko tuta JSON mila | `400 Invalid JSON in request body` |
+| Baaki sab (bug, DB down) | kuch bhi | `500` generic message |
+
+Dhyaan dene wali baatein:
+
+- `TokenExpiredError`, `JsonWebTokenError` ka child hai, isliye **pehle** check kiya.
+- **500 pe internal detail leak nahi hoti:** client ko generic message, aur `error.message` sirf `NODE_ENV !== 'production'` me. Poora error server log me (`console.error`).
+- `res.headersSent` guard: agar response pehle hi ja chuka hai to dobara bhejne par `ERR_HTTP_HEADERS_SENT` aata, isliye `next(err)` karke Express ke default handler ko de dete hain.
+
+### Step 3: `app.js` me lagana (order important hai)
+
+```js
+const { notFoundHandler, errorHandler } = require('./middleware/error.middleware');
+
+// ... saare routes ...
+app.use('/api/me', userRouter);
+
+// Error handling: hamesha saare routes ke BAAD, aur is order me
+app.use(notFoundHandler);
+app.use(errorHandler);
+```
+
+- Routes ke **baad** isliye, warna routes se pehle 404 chal jaata.
+- `notFoundHandler` pehle, `errorHandler` last me, kyunki 404 bhi ek `ApiError` hai jo `errorHandler` tak jaana chahiye.
+
+### Step 4: Controllers refactor (before / after)
+
+Rule simple hai: **error ho to `throw new ApiError(...)`, success ho to `sendResponse(...)`**. 200/201/202 wale responses (jaise idempotency ka `200 already completed` aur `202 pending`) error nahi hain, isliye `sendResponse` hi rahe.
+
+**1) `account.controller.js`**: `return sendResponse(res, 4xx, ...)` ko `throw` bana diya.
+
+```js
+// pehle
+if (isAccountExist) {
+    return sendResponse(res, 400, 'Account already created');
+}
+
+// ab
+if (isAccountExist) {
+    throw new ApiError(400, 'Account already created');
+}
+```
+
+Same `getBalanceController` me (`404 Account not found for this user...`).
+
+**2) `auth.middleware.js`**: poora `try/catch` hata diya.
+
+```js
+// pehle: try { jwt.verify...; ...} catch { return 401 }  (har error 401 ban jaata tha, DB error bhi)
+
+// ab
+const decodedToken = jwt.verify(token, process.env.JWT_SECRET); // galat/expire token par khud throw karta hai
+const user = await userModel.findById(decodedToken.userId);
+if (!user) throw new ApiError(401, 'Unauthorized access, token is invalid');
+```
+
+- `jwt.verify()` ka throw `errorHandler` me `401` ban jaata hai (expired ka alag message).
+- Fayda: ab DB down jaise real server errors `401` nahi, `500` dikhte hain (pehle sab 401 me chhup jaate the).
+- `systemUserAuthMiddleware` me bhi wahi.
+
+**3) `auth.controller.js`**: `register` ka `try/catch` hata diya.
+
+```js
+// pehle: catch me ValidationError (400), 11000 (422), baaki 500 ka alag-alag code
+// ab: kuch nahi, global handler ye sab karta hai
+async function userRegisterController(req, res) {
+    const { email, password, name } = req.body ?? {};
+    ...
+}
+```
+
+Email wala hissa alag, response ke baad:
+
+```js
+sendResponse(res, 201, 'User has been successfully created', { user: {...}, token });
+
+// Response ja chuka hai, email fail ho to sirf log karo (dobara response nahi bhejna)
+try {
+    await sendRegistrationEmail(email, name);
+} catch (error) {
+    console.error('Registration email failed:', error);
+}
+```
+
+**4) `transaction.controller.js`** (sabse important): yahan MongoDB session ka `try/catch/finally` **rakhna zaroori** hai, kyunki rollback karna hai. Bas error ka response bhejne ki jagah error **dobara throw** karte hain.
+
+```js
+try {
+    if (!currentUserAccount) {
+        throw new ApiError(400, 'Account not found for this user, please create an account first');
+    }
+    ...
+    session = await mongoose.startSession();
+    session.startTransaction();
+    ...
+    await session.commitTransaction();
+    return sendResponse(res, 201, 'Transaction completed successfully', { transaction });
+} catch (error) {
+    if (session?.inTransaction()) {
+        await session.abortTransaction();   // pehle rollback
+    }
+    throw error;                            // phir error global handler ko do
+} finally {
+    session?.endSession();                  // hamesha session release
+}
+```
+
+- Session shuru hone se pehle wale `ApiError` bhi isi `catch` me aate hain. Wahan `session` `null` hai, to `session?.inTransaction()` `undefined` deta hai aur abort skip ho jaata hai. Phir `throw error` se handler ko mil jaate hain.
+- Pehle `500` me `error: error.message` hamesha jaata tha, ab sirf development me.
+
+### Step 5: Jo chhote behaviour changes hue (jaan lo)
+
+| Cheez | Pehle | Ab |
+|---|---|---|
+| Duplicate key race (email / `idempotencyKey`) | register `422`, transfer `500` | dono `409 Duplicate value for: <field>` (pehle wala check `User already exists` `422` abhi bhi hai) |
+| Expire token | `401 token is invalid` | `401 token has expired` |
+| DB down ke time protected route | `401` | `500` (sahi hai, ye auth fail nahi hai) |
+| Tuta hua JSON body | Express ka default HTML error | `400 Invalid JSON in request body` |
+| Galat route (`/api/nope`) | Express ka default HTML `Cannot GET` | JSON `404 Route GET /api/nope not found` |
+| Galat ObjectId (`toAccount: "abc"`) | generic `500` | `400 Invalid value for _id` |
+| `register` / `login` me body na ho | `TypeError` se `500` | `req.body ?? {}` lagaya; register me validation `400`, login me `400 Email and password are required` |
+| Login me email/password missing | `findOne({ email: undefined })` kisi bhi user ko match kar sakta tha | pehle hi `400` |
+| Register me email fail | `ERR_HTTP_HEADERS_SENT` ka risk | sirf log, response disturb nahi hota |
+
+### Test kaise kiya
+
+Ek temporary database (`ledger_tmp_test`, replica set wale `mongo-rs` pe) banake **26 real HTTP requests** chalayi, phir database drop kar diya. Users directly DB me bana ke JWT khud sign kiya, taaki register ka asli email na jaaye.
+
+| Case | Result |
+|---|---|
+| Unknown route | `404 Route GET /api/nope not found` |
+| Token nahi / galat / expire | `401` (alag-alag message) |
+| Normal user ne system route hit kiya | `401 ... not a system user` |
+| Tuta JSON, login bina body, galat password | `400`, `400`, `401` |
+| Register validation (galat email + chhota name/password) | `400` (teeno messages) |
+| Account nahi hai, balance / transfer | `404` / `400` clear message |
+| Account dobara create | `400 Account already created` |
+| Galat `toAccount` id | `400 Invalid value for _id` |
+| Initial funds, same key dobara, system account pe | `201`, `200 already completed`, `400` |
+| Insufficient balance transfer | `400` |
+| Real transfer (session + commit) | `201`, balance `40` aaya |
+| Accounts list | sirf Bob (apna + system account nahi) |
+
+Handler pe direct bhi check kiya: `code 11000` -> `409`, unexpected error -> `500` (dev me `error` field, production me nahi), `headersSent` -> `next(err)`.
+
+### Aage kaise use karna hai (rule of thumb)
+
+```js
+// 1. Validation / business rule fail -> throw
+if (!amount) throw new ApiError(400, 'Amount is required');
+
+// 2. Success -> sendResponse
+return sendResponse(res, 201, 'Created', { thing });
+
+// 3. Bug / DB error -> kuch mat karo, throw hone do (handler 500 bana dega)
+const data = await Model.find();   // try/catch ki zaroorat nahi
+```
+
+- Sirf wahin `try/catch` likho jahan cleanup chahiye (jaise MongoDB session abort), aur wahan bhi end me `throw error`.
+- `res.status(...).json(...)` aur `return sendResponse(res, 4xx...)` ab error ke liye mat likhna.
+
+### Files ka summary
+
+| File | Kya hua |
+|---|---|
+| `src/utils/ApiError.js` | naya |
+| `src/middleware/error.middleware.js` | naya (`notFoundHandler`, `errorHandler`) |
+| `src/app.js` | handlers lagaye (routes ke baad) |
+| `src/controllers/account.controller.js` | 4xx -> `throw ApiError` |
+| `src/controllers/auth.controller.js` | `try/catch` hataya, login guard, email alag `try/catch` |
+| `src/controllers/transaction.controller.js` | 4xx -> `throw ApiError`, `catch` me abort + `throw error` |
+| `src/middleware/auth.middleware.js` | `try/catch` hataya, `throw ApiError` |
+
+
 ## Roadmap: Aage kya-kya develop karna hai (TODO list)
 
 Ye section "future plan" hai. Jo cheez ho jaaye, uska checkbox `[x]` karke upar ke steps me uski entry (kya, kyu, kaise) likhni hai.
@@ -1194,7 +1481,7 @@ Ye section "future plan" hai. Jo cheez ho jaaye, uska checkbox `[x]` karke upar 
 4. [ ] Account freeze / close
 5. [ ] Transaction revert
 6. [ ] Password change + forgot password
-7. [ ] Rate limiting, global error handler, tests, docs
+7. [ ] Rate limiting, tests, docs (global error handler ho gaya, Step 18)
 
 Is order ka reason: pehle security hole band ho, phir history dekhna, phir ledger ke advanced kaam (revert) jisme sabse zyada seekhne ko milega.
 
@@ -1228,15 +1515,15 @@ Is order ka reason: pehle security hole band ho, phir history dekhna, phir ledge
 
 #### A4. Idempotency key ka race
 
-- [ ] **Abhi kya hai:** `transaction.model.js` me `idempotencyKey` pe `unique: true` hai, to DB level pe duplicate transaction ban nahi sakti. Ye achha hai.
-- [ ] **Problem:** do request same `idempotencyKey` se **ek saath** aayein to dono `findOne` check pass kar leti hain. Dusri request `create` pe duplicate key error (`code 11000`) khaati hai, jo abhi generic `500 Failed to create transaction` ban jaata hai.
-- [ ] **Kya karna hai:** transfer ke `catch` me `error.code === 11000` pakdo, aur `409` (ya existing transaction ka status) bhejo. Auth controller me register me aisa pehle se kiya hai (E11000 handle).
+- [x] **Abhi kya hai:** `transaction.model.js` me `idempotencyKey` pe `unique: true` hai, to DB level pe duplicate transaction ban nahi sakti.
+- **Problem tha:** do request same `idempotencyKey` se **ek saath** aayein to dono `findOne` check pass kar leti hain. Dusri request `create` pe duplicate key error (`code 11000`) khaati thi, jo generic `500` ban jaata tha.
+- **Ab (Step 18):** global error handler `11000` ko pakad leta hai aur `409 Duplicate value for: idempotencyKey` deta hai. Isse behtar response (existing transaction ka status) dena abhi baaki hai.
 
 #### A5. Chhote cleanups
 
 - [ ] `createTransactionController` me `currentUser` ab use hota hai, par baaki unused variables / imports check karo.
 - [ ] Failed transaction par status `FAILED` set karna: abhi error aaye to rollback ho jaata hai par koi `FAILED` record nahi bachta. Audit ke liye bahar (session ke bahar) ek `FAILED` record rakhna achha hai.
-- [ ] `register` me response bhejne ke baad `await sendRegistrationEmail(...)` hota hai. Email fail ho to `catch` me jaake dobara response bhejne ki koshish hoti hai (`ERR_HTTP_HEADERS_SENT`). Email ko try/catch me alag karo.
+- [x] `register` me email fail hone par dobara response bhejne ki koshish hoti thi (`ERR_HTTP_HEADERS_SENT`). Step 18 me email ko alag `try/catch` me daal diya, ab sirf log hota hai.
 - [ ] `/api/accounts` list me abhi pagination nahi hai (Section B1 jaisa add karo).
 
 ---
@@ -1379,7 +1666,7 @@ Is order ka reason: pehle security hole band ho, phir history dekhna, phir ledge
 | Cheez | Kya karna hai | Kaise |
 |---|---|---|
 | **Input validation** | Har route ka body/query validate | `zod` ya `joi`, ek reusable `validate(schema)` middleware |
-| **Global error handler** | `catch` ke 500 blocks ek jagah | `ApiError` class + last me `app.use((err, req, res, next) => ...)`, `sendResponse` ke saath |
+| **Global error handler** | **Ho gaya (Step 18).** `catch` ke 500 blocks ek jagah | `ApiError` class + `error.middleware.js`, `sendResponse` ke saath |
 | **Rate limiting** | Login, register, transfer, forgot-password pe | `express-rate-limit` |
 | **Security headers + CORS** | Basic hardening | `helmet`, `cors` (allowed origin config) |
 | **Logging** | `console.log` ki jagah proper logs | `pino` ya `winston`, request id |
