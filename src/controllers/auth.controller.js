@@ -1,6 +1,7 @@
 const userModel = require('../models/user.model');
 const jwt = require('jsonwebtoken');
 const { sendRegistrationEmail } = require('../services/email.service');
+const { sendResponse } = require('../utils/response');
 
 /**
  * - User Register Controller
@@ -12,10 +13,7 @@ async function userRegisterController(req, res) {
         const isEmailExists = await userModel.findOne({ email });
 
         if (isEmailExists) {
-            return res.status(422).json({
-                message: 'User already exists with this email.',
-                status: 'failed',
-            });
+            return sendResponse(res, 422, 'User already exists with this email.');
         }
 
         const user = await userModel.create({
@@ -40,42 +38,32 @@ async function userRegisterController(req, res) {
             secure: process.env.NODE_ENV === 'production',
         });
 
-        res.status(201).json({
+        sendResponse(res, 201, 'User has been successfully created', {
             user: {
                 id: user._id,
                 email: user.email,
                 name: user.name,
             },
             token: token,
-            message: 'User has been successfully created',
-            status: 'success',
         });
 
         await sendRegistrationEmail(email, name);
     } catch (error) {
         // schema validation fail (galat email, chhota password, etc.)
         if (error.name === 'ValidationError') {
-            return res.status(400).json({
-                message: Object.values(error.errors)
-                    .map((e) => e.message)
-                    .join(', '),
-                status: 'failed',
-            });
+            const message = Object.values(error.errors)
+                .map((e) => e.message)
+                .join(', ');
+            return sendResponse(res, 400, message);
         }
 
         // do request ek saath aayi to unique index duplicate email par E11000 deta hai
         if (error.code === 11000) {
-            return res.status(422).json({
-                message: 'User already exists with this email.',
-                status: 'failed',
-            });
+            return sendResponse(res, 422, 'User already exists with this email.');
         }
 
         console.error('Register error:', error);
-        return res.status(500).json({
-            message: 'Something went wrong, please try again later.',
-            status: 'failed',
-        });
+        return sendResponse(res, 500, 'Something went wrong, please try again later.');
     }
 }
 
@@ -91,18 +79,12 @@ async function userLoginController(req, res) {
     const user = await userModel.findOne({ email }).select('+password');
 
     if (!user) {
-        return res.status(401).json({
-            status: 'failed',
-            message: 'Email or password is not valid',
-        });
+        return sendResponse(res, 401, 'Email or password is not valid');
     }
 
     const isValidPassword = await user.comparePassword(password);
     if (!isValidPassword) {
-        return res.status(401).json({
-            status: 'failed',
-            message: 'Email or password is not valid',
-        });
+        return sendResponse(res, 401, 'Email or password is not valid');
     }
 
     const jwtSecret = process.env.JWT_SECRET;
@@ -121,15 +103,13 @@ async function userLoginController(req, res) {
         secure: process.env.NODE_ENV === 'production',
     });
 
-    res.status(200).json({
+    sendResponse(res, 200, 'User has been successfully login', {
         user: {
             id: user._id,
             email: user.email,
             name: user.name,
         },
         token: token,
-        message: 'User has been successfully login',
-        status: 'success',
     });
 }
 
@@ -137,18 +117,12 @@ async function userLogoutController(req, res) {
     const token = req.cookies?.jwt_token || req.headers.authorization?.split(' ')[1];
 
     if (!token) {
-        return res.status(200).json({
-            status: 'success',
-            message: 'User logged out successfully',
-        });
+        return sendResponse(res, 200, 'User logged out successfully');
     }
 
     res.clearCookie("jwt_token");
 
-    return res.status(200).json({
-        status: 'success',
-        message: 'User logged out successfully',
-    });
+    return sendResponse(res, 200, 'User logged out successfully');
 }
 
 module.exports = {

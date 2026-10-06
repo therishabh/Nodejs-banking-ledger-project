@@ -851,10 +851,24 @@ Flow:
 
 1. Required fields check (`400`)
 2. `toAccount` fetch (`400 Invalid Account`)
-3. System user ka apna account dhoondho (`fromUserAccount`)
-4. Idempotency key check (same table jo Step 2 me hai)
-5. Session start -> `PENDING` transaction -> **DEBIT** system account, **CREDIT** `toAccount` -> `COMPLETED` -> commit
-6. `201` + transaction
+3. `toAccount` kisi system user ka nahi hona chahiye (`400 toAccount should not be system account`)
+4. System user ka apna account dhoondho (`fromUserAccount`)
+5. Idempotency key check (same table jo Step 2 me hai)
+6. Session start -> `PENDING` transaction -> **DEBIT** system account, **CREDIT** `toAccount` -> `COMPLETED` -> commit
+7. `201` + transaction
+
+Step 3 ka check:
+
+```js
+const toUser = await userModel.findById(toUserAccount.user).select('+systemUser');
+
+if (toUser?.systemUser) {
+    return sendResponse(res, 400, 'toAccount should not be system account');
+}
+```
+
+- `systemUser` me `select: false` hai, isliye yahan `.select('+systemUser')` **zaroori** hai. Iske bina field aata hi nahi, `systemUser` hamesha `undefined` rehta aur ye check kabhi trigger nahi hota (pehle yahi bug tha).
+- Ye check abhi sirf initial-funds me hai. Normal transfer (`createTransactionController`) me system account pe bhejna abhi nahi roka gaya.
 
 Bugs jo fix kiye:
 
@@ -940,3 +954,69 @@ Note: `.env` git-ignored hai, isliye URI commit me nahi jaati.
 3. Har user ke liye account create
 4. System user se `POST /api/transactions/system/initial-funds`
 5. Normal user se `POST /api/transactions` (transfer)
+
+## Step 15: `sendResponse` helper (repeat hone wala res.status().json() hataya)
+
+Har controller/middleware me `res.status(..).json({ message, status, ... })` baar-baar likha ja raha tha, aur har jagah `status: 'failed'` / `'success'` manually dena padta tha. Iske liye ek common helper banaya.
+
+Naya folder + file: `src/utils/response.js`
+
+```js
+function sendResponse(res, statusCode, message, extra = {}) {
+    return res.status(statusCode).json({
+        message,
+        status: statusCode < 400 ? 'success' : 'failed',
+        ...extra,
+    });
+}
+
+module.exports = { sendResponse };
+```
+
+- `status` auto set hota hai: code `< 400` to `'success'`, warna `'failed'`.
+- Extra data (`user`, `token`, `transaction`, `account`, `error`) 4th argument me jaata hai.
+- Special case (jaise **202 pending**) me `extra` me `status` bhej do, wo default ko override kar deta hai.
+- Response ka shape pehle jaisa hi hai (`message`, `status`, + extra), isliye client side pe kuch nahi badla. Sirf JSON keys ka order alag ho sakta hai.
+
+### Use kaise karte hain
+
+```js
+// pehle
+return res.status(201).json({
+    message: 'Account has been successfully created',
+    status: 'success',
+    account,
+});
+
+// ab
+return sendResponse(res, 201, 'Account has been successfully created', { account });
+```
+
+```js
+// 202 pending (status override)
+return sendResponse(res, 202, 'Transaction ... is pending', { status: 'pending' });
+
+// error ke saath extra field
+sendResponse(res, 500, 'Failed to create transaction', { error: error.message });
+```
+
+### Kahan-kahan laga (total 38 calls)
+
+| File | Calls |
+|---|---|
+| `src/controllers/account.controller.js` | 2 |
+| `src/controllers/auth.controller.js` | 10 (register, login, logout) |
+| `src/controllers/transaction.controller.js` | 20 (dono controllers) |
+| `src/middleware/auth.middleware.js` | 6 (`authMiddleware`, `systemUserAuthMiddleware`) |
+
+Har file ke top pe import:
+
+```js
+const { sendResponse } = require('../utils/response');
+```
+
+Notes:
+
+- Refactor ek script se kiya (message/status nikalke baaki fields extra me daale). Phir auth me validation errors wala multi-line `message` ko `const message = ...` me nikalke manually theek kiya.
+- `res.cookie(...)` / `res.clearCookie(...)` jaisi calls waise hi hain, kyunki wo JSON response nahi hain.
+- Future idea: error ke liye `ApiError` class + global error middleware, taaki `catch` ke 500 blocks bhi ek jagah aa jaayein.

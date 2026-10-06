@@ -2,6 +2,8 @@ const mongoose = require('mongoose');
 const transactionModel = require('../models/transaction.model');
 const ledgerModel = require('../models/ledger.model');
 const accountModel = require('../models/account.model');
+const { sendResponse } = require('../utils/response');
+const userModel = require('../models/user.model');
 
 /**
  * - Create a new transaction
@@ -35,10 +37,7 @@ async function createTransactionController(req, res) {
 
         // Saare required fields hone zaroori hain, warna 400 bhej do
         if (!fromAccount || !toAccount || !amount || !idempotencyKey) {
-            return res.status(400).json({
-                message: 'Missing required fields (fromAccount, toAccount, amount, idempotencyKey)',
-                status: 'failed',
-            });
+            return sendResponse(res, 400, 'Missing required fields (fromAccount, toAccount, amount, idempotencyKey)');
         }
 
         /** 
@@ -50,40 +49,27 @@ async function createTransactionController(req, res) {
         const isTransactionExists = await transactionModel.findOne({ idempotencyKey: idempotencyKey });
         if (isTransactionExists) {
             if (isTransactionExists.status === 'COMPLETED') {
-                return res.status(200).json({
-                    message: 'Transaction with the same idempotency key already exists and is completed',
-                    status: 'success',
-                });
+                return sendResponse(res, 200, 'Transaction with the same idempotency key already exists and is completed');
             }
 
             // Abhi process ho rahi hai -> 202 Accepted, final result nahi hai isliye status 'pending'
             if (isTransactionExists.status === 'PENDING') {
-                return res.status(202).json({
-                    message: 'Transaction with the same idempotency key already exists and is pending',
+                return sendResponse(res, 202, 'Transaction with the same idempotency key already exists and is pending', {
                     status: 'pending',
                 });
             }
 
             // Pehle fail ho chuki hai -> success nahi bol sakte, 409 + status 'failed'
             if (isTransactionExists.status === 'FAILED') {
-                return res.status(409).json({
-                    message: 'Transaction with the same idempotency key already exists and has failed',
-                    status: 'failed',
-                });
+                return sendResponse(res, 409, 'Transaction with the same idempotency key already exists and has failed');
             }
 
             // Revert ho chuki hai -> 409 + status 'failed'
             if (isTransactionExists.status === 'REVERTED') {
-                return res.status(409).json({
-                    message: 'Transaction with the same idempotency key already exists and has been reverted',
-                    status: 'failed',
-                });
+                return sendResponse(res, 409, 'Transaction with the same idempotency key already exists and has been reverted');
             }
 
-            return res.status(409).json({
-                message: 'Transaction with the same idempotency key already exists',
-                status: 'failed',
-            });
+            return sendResponse(res, 409, 'Transaction with the same idempotency key already exists');
         }
 
         /**
@@ -95,10 +81,7 @@ async function createTransactionController(req, res) {
 
         // Dono me se koi bhi account nahi mila to 400 bhej do
         if (!fromAccountDoc || !toAccountDoc) {
-            return res.status(400).json({
-                message: 'One or both accounts not found',
-                status: 'failed',
-            });
+            return sendResponse(res, 400, 'One or both accounts not found');
         }
 
         /**
@@ -107,10 +90,7 @@ async function createTransactionController(req, res) {
          * 
          */
         if (fromAccountDoc.status !== 'ACTIVE' || toAccountDoc.status !== 'ACTIVE') {
-            return res.status(400).json({
-                message: 'One or both accounts are not active',
-                status: 'failed',
-            });
+            return sendResponse(res, 400, 'One or both accounts are not active');
         }
 
         /**
@@ -120,10 +100,7 @@ async function createTransactionController(req, res) {
          */
         const senderAccountBalance = await fromAccountDoc.getBalance();
         if (senderAccountBalance < amount) {
-            return res.status(400).json({
-                message: `Insufficient balance in sender account, current balance: ${senderAccountBalance} and required amount: ${amount}`,
-                status: 'failed',
-            });
+            return sendResponse(res, 400, `Insufficient balance in sender account, current balance: ${senderAccountBalance} and required amount: ${amount}`);
         }
 
         /**
@@ -179,22 +156,14 @@ async function createTransactionController(req, res) {
          * 10. Return a success response with the transaction details
          * 201 Created: nayi transaction ban gayi aur COMPLETED ho chuki hai.
          */
-        return res.status(201).json({
-            message: 'Transaction completed successfully',
-            status: 'success',
-            transaction,
-        });
+        return sendResponse(res, 201, 'Transaction completed successfully', { transaction });
     } catch (error) {
         // Beech me kuch fail hua to ab tak ke saare writes rollback karo (partial data na bache)
         if (session?.inTransaction()) {
             await session.abortTransaction();
         }
 
-        res.status(500).json({
-            message: 'Failed to create transaction',
-            status: 'failed',
-            error: error.message,
-        });
+        sendResponse(res, 500, 'Failed to create transaction', { error: error.message });
     } finally {
         // Success ho ya error, session hamesha release karo
         session?.endSession();
@@ -212,19 +181,21 @@ async function createInitialFundsTransactionController(req, res) {
 
         // Saare required fields hone zaroori hain, warna 400 bhej do
         if (!toAccount || !amount || !idempotencyKey) {
-            return res.status(400).json({
-                message: 'Missing required fields (toAccount, amount, idempotencyKey)',
-                status: 'failed',
-            });
+            return sendResponse(res, 400, 'Missing required fields (toAccount, amount, idempotencyKey)');
         }
 
         const toUserAccount = await accountModel.findById(toAccount);
 
         if (!toUserAccount) {
-            return res.status(400).json({
-                message: 'Invalid Account',
-                status: 'failed',
-            });
+            return sendResponse(res, 400, 'Invalid Account');
+        }
+
+        // toAccount system user ka nahi hona chahiye.
+        // `systemUser` me select:false hai, isliye .select('+systemUser') zaroori hai warna ye field aata hi nahi.
+        const toUser = await userModel.findById(toUserAccount.user).select('+systemUser');
+
+        if (toUser?.systemUser) {
+            return sendResponse(res, 400, 'toAccount should not be system account');
         }
 
         // `systemUser` flag user model me hai (account me nahi). systemUserAuthMiddleware pehle hi
@@ -235,49 +206,33 @@ async function createInitialFundsTransactionController(req, res) {
         });
 
         if (!fromUserAccount) {
-            return res.status(400).json({
-                message: 'Active account not found for system user',
-                status: 'failed',
-            });
+            return sendResponse(res, 400, 'Active account not found for system user');
         }
 
         const isTransactionExists = await transactionModel.findOne({ idempotencyKey: idempotencyKey });
         if (isTransactionExists) {
             if (isTransactionExists.status === 'COMPLETED') {
-                return res.status(200).json({
-                    message: 'Transaction with the same idempotency key already exists and is completed',
-                    status: 'success',
-                });
+                return sendResponse(res, 200, 'Transaction with the same idempotency key already exists and is completed');
             }
 
             // Abhi process ho rahi hai -> 202 Accepted, final result nahi hai isliye status 'pending'
             if (isTransactionExists.status === 'PENDING') {
-                return res.status(202).json({
-                    message: 'Transaction with the same idempotency key already exists and is pending',
+                return sendResponse(res, 202, 'Transaction with the same idempotency key already exists and is pending', {
                     status: 'pending',
                 });
             }
 
             // Pehle fail ho chuki hai -> success nahi bol sakte, 409 + status 'failed'
             if (isTransactionExists.status === 'FAILED') {
-                return res.status(409).json({
-                    message: 'Transaction with the same idempotency key already exists and has failed',
-                    status: 'failed',
-                });
+                return sendResponse(res, 409, 'Transaction with the same idempotency key already exists and has failed');
             }
 
             // Revert ho chuki hai -> 409 + status 'failed'
             if (isTransactionExists.status === 'REVERTED') {
-                return res.status(409).json({
-                    message: 'Transaction with the same idempotency key already exists and has been reverted',
-                    status: 'failed',
-                });
+                return sendResponse(res, 409, 'Transaction with the same idempotency key already exists and has been reverted');
             }
 
-            return res.status(409).json({
-                message: 'Transaction with the same idempotency key already exists',
-                status: 'failed',
-            });
+            return sendResponse(res, 409, 'Transaction with the same idempotency key already exists');
         }
 
         session = await mongoose.startSession();
@@ -312,22 +267,14 @@ async function createInitialFundsTransactionController(req, res) {
         await session.commitTransaction();
 
         // Initial funds credit ho gaye -> 201 Created + transaction details
-        return res.status(201).json({
-            message: 'Initial funds transaction completed successfully',
-            status: 'success',
-            transaction,
-        });
+        return sendResponse(res, 201, 'Initial funds transaction completed successfully', { transaction });
     } catch (error) {
         // Beech me kuch fail hua to ab tak ke saare writes rollback karo (partial data na bache)
         if (session?.inTransaction()) {
             await session.abortTransaction();
         }
 
-        res.status(500).json({
-            message: 'Failed to create transaction',
-            status: 'failed',
-            error: error.message,
-        });
+        sendResponse(res, 500, 'Failed to create transaction', { error: error.message });
     } finally {
         // Success ho ya error, session hamesha release karo
         session?.endSession();

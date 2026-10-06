@@ -1,4 +1,5 @@
 const accountModel = require('./../models/account.model');
+const { sendResponse } = require('../utils/response');
 
 async function createAccountController(req, res) {
     const currentUser = req.user;
@@ -11,10 +12,7 @@ async function createAccountController(req, res) {
     })
 
     if (isAccountExist) {
-        return res.status(400).json({
-            status: "failed",
-            message: "Account already created"
-        })
+        return sendResponse(res, 400, "Account already created");
     }
 
     const account = await accountModel.create({
@@ -23,11 +21,7 @@ async function createAccountController(req, res) {
         status: status,
     });
 
-    return res.status(201).json({
-        message: 'Account has been successfully created',
-        status: 'success',
-        account,
-    });
+    return sendResponse(res, 201, 'Account has been successfully created', { account });
 }
 
 module.exports = {
