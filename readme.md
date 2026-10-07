@@ -1459,6 +1459,955 @@ const data = await Model.find();   // try/catch ki zaroorat nahi
 | `src/middleware/auth.middleware.js` | `try/catch` hataya, `throw ApiError` |
 
 
+## Step 19: Swagger (API documentation + try karne ki jagah)
+
+### Swagger kya hai? (beginner ke liye)
+
+Ab tak API test karne ke liye `request.http` ya Postman use hota tha. Problem: dusre ko ya khud ko baad me yaad nahi rehta ki kaun si API hai, kya body leti hai, kya response deti hai.
+
+**Swagger UI** ek web page hai jo tumhari saari APIs ki list dikhata hai, aur wahin se **"Try it out" dabake API chala sakte ho**, bina Postman ke. Ye page ek file se banta hai jise **OpenAPI spec** kehte hain (ek JSON jisme likha hota hai: API ka path, method, body, response).
+
+Teen naam confuse karte hain:
+
+| Naam | Kya hai |
+|---|---|
+| **OpenAPI** | API describe karne ka standard format (JSON/YAML). Ye "specification" hai. |
+| **Swagger UI** | Us spec ko padhke sundar page banane wala tool. |
+| **swagger-jsdoc** | Tumhare code ke comments se OpenAPI spec **khud banata hai**. |
+
+### Hamara flow (kaun kya karta hai)
+
+```
+routes/*.js me @openapi comments (YAML)
+        |
+        v   swagger-jsdoc padhta hai (config/swagger.js)
+OpenAPI spec (ek JS object / JSON)
+        |
+        v   swagger-ui-express dikhata hai (app.js)
+http://localhost:9000/api-docs   <-- browser me ye page khulta hai
+```
+
+Spec ko seedha JSON me bhi dekh sakte ho: `http://localhost:9000/api-docs.json` (Postman me import karne ke kaam aata hai).
+
+### Step 1: Packages install
+
+```bash
+npm install swagger-ui-express swagger-jsdoc
+```
+
+- `swagger-ui-express`: Express app me Swagger UI page lagata hai.
+- `swagger-jsdoc`: comments se spec banata hai.
+- `package.json` ke `dependencies` me dono aa gaye (ye production me bhi chahiye, isliye dev dependency nahi).
+
+### Step 2: Config file banayi: `src/config/swagger.js`
+
+Isme 3 hisse hain.
+
+**(a) `info`**: docs ka title, version, description (isme "Swagger me login kaise karein" bhi likha hai).
+
+```js
+definition: {
+    openapi: '3.0.3',
+    info: { title: 'Backend Ledger API', version: '1.0.0', description: '...' },
+    servers: [{ url: '/' }],   // jis host/port pe docs khule hain, requests wahin jaayengi
+    tags: [{ name: 'Auth' }, { name: 'User' }, { name: 'Accounts' }, { name: 'Transactions' }],
+```
+
+- `tags` se APIs page par groups me dikhti hain.
+
+**(b) `components`**: baar-baar kaam aane wale tukde, ek baar likho aur `$ref` se jahan chahiye wahan lagao (jaise functions).
+
+```js
+components: {
+    securitySchemes: {
+        bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },   // login ka tareeka
+    },
+    responses: { Unauthorized: {...}, BadRequest: {...}, NotFound: {...} },    // common error responses
+    schemas:   { ErrorResponse, User, Account, Transaction },                  // data ki shape
+}
+```
+
+- `bearerAuth` = request ke header me `Authorization: Bearer <token>` (hamare `authMiddleware` jaisa).
+- `$ref: '#/components/schemas/Account'` ka matlab "wahan upar jo `Account` shape likhi hai wo yahan use karo".
+
+**(c) `apis`**: kin files me comments scan karne hain.
+
+```js
+apis: [path.join(__dirname, '../routes/*.js')],
+```
+
+- `__dirname` se absolute path banaya, taaki server kisi bhi folder se start ho, files mil jaayein. (Relative `./src/routes/*.js` likhte to sirf project root se chalane par kaam karta.)
+
+Last me: `const swaggerSpec = swaggerJSDoc(options); module.exports = swaggerSpec;`
+
+### Step 3: Routes me `@openapi` comments likhe
+
+Har route ke upar ek comment block. Andar **YAML** hota hai (indentation matter karti hai!). Example `src/routes/account.routes.js` se:
+
+```js
+/**
+ * @openapi
+ * /api/accounts/balance:            <- path
+ *   get:                            <- method
+ *     tags: [Accounts]              <- kis group me dikhega
+ *     summary: Apne account ka balance
+ *     security:
+ *       - bearerAuth: []            <- ye route protected hai (page pe lock icon aata hai)
+ *     responses:
+ *       200:
+ *         description: Current balance
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 balance: { type: number, example: 150 }
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'   <- common error reuse
+ */
+router.get('/balance', authMiddleware, getBalanceController);
+```
+
+Body wali API me `requestBody` bhi hota hai (transfer ka example):
+
+```yaml
+requestBody:
+  required: true
+  content:
+    application/json:
+      schema:
+        type: object
+        required: [toAccount, amount, idempotencyKey]
+        properties:
+          toAccount: { type: string, example: 665f1c2e9b1e8a0012a4b999 }
+          amount: { type: number, minimum: 0.01, example: 40 }
+          idempotencyKey: { type: string, example: txn-2026-0001 }
+```
+
+- `example` wahi value hai jo "Try it out" me pehle se bhari aati hai.
+- Jis API me login chahiye wahan `security: - bearerAuth: []`, jahan nahi chahiye (register, login, logout) wahan nahi likha.
+
+Kul **9 operations** document hue:
+
+| Tag | APIs |
+|---|---|
+| Auth | `POST /api/auth/register`, `login`, `logout` |
+| User | `GET /api/me` |
+| Accounts | `POST /api/accounts`, `GET /api/accounts`, `GET /api/accounts/balance` |
+| Transactions | `POST /api/transactions`, `POST /api/transactions/system/initial-funds` |
+
+### Step 4: `app.js` me page lagaya
+
+```js
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpec = require('./config/swagger');
+
+app.use(
+    '/api-docs',
+    swaggerUi.serve,
+    swaggerUi.setup(swaggerSpec, { swaggerOptions: { persistAuthorization: true } }),
+);
+app.get('/api-docs.json', (req, res) => res.json(swaggerSpec));
+```
+
+- `swaggerUi.serve` page ki static files (JS/CSS) deta hai, `swaggerUi.setup(spec)` page banata hai.
+- `persistAuthorization: true`: Authorize me daala token page refresh ke baad bhi yaad rehta hai.
+- Ye **error handlers (404) se pehle** hai (Step 18 ka order bigda nahi), warna `/api-docs` ko 404 mil jaata.
+
+### Step 5: Kaise use karna hai (step by step)
+
+1. Server chalao: `npm run dev`
+2. Browser me kholo: **http://localhost:9000/api-docs**
+3. Pehle **`POST /api/auth/register`** ya **`login`** kholo, **Try it out** dabao, body bharo, **Execute**.
+4. Response me `token` aayega. Usse copy karo (quotes ke bina).
+5. Page ke upar **Authorize** button dabao, token paste karo (**`Bearer` mat likhna**, wo khud lag jaata hai), Authorize.
+6. Ab lock wale APIs (`/api/me`, `/api/accounts/balance`, transfer...) chalenge.
+7. System user ke APIs ke liye system user ka token Authorize me daalna padega.
+
+### Gotchas (aksar galti yahin hoti hai)
+
+- **YAML indentation:** comment ke andar space ek bhi idhar-udhar hua to spec me wo API nahi dikhegi ya error aayega. Space use karo, tab nahi.
+- **Colon wali text quotes me likho:** `summary: "[System user only] Kisi account me funds daalo"` (bina quotes ke `:` ya `[` YAML ko confuse kar dete hain).
+- **Naya route banaya to uska `@openapi` comment bhi likho**, warna wo docs me nahi aayega (code aur docs ek jagah hain, isliye yaad rakhna aasaan hai).
+- **Cookie wali baat:** login karne par server cookie `jwt_token` bhi set karta hai, aur browser same site par use khud bhej deta hai. Isliye kabhi-kabhi Authorize ke bina bhi protected API chal jaati hai. Logout chalao ya cookie delete karo to wo band ho jaayega.
+- **Token commit mat karna / kisi ko share mat karna.** `persistAuthorization` token browser ke localStorage me rakhta hai.
+- `/api-docs` ek `301` redirect karke `/api-docs/` pe jaata hai, ye normal hai.
+- Production me docs public rakhne se pehle sochna (chaho to `NODE_ENV !== 'production'` pe hi mount karo).
+
+### Naya API add karoge to docs kaise likhna (template)
+
+```js
+/**
+ * @openapi
+ * /api/<path>:
+ *   <get|post|patch|delete>:
+ *     tags: [<Group>]
+ *     summary: <ek line me kya karta hai>
+ *     security:
+ *       - bearerAuth: []        # sirf protected API me
+ *     requestBody:              # sirf body wali API me
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               field: { type: string, example: abc }
+ *     responses:
+ *       200:
+ *         description: Success
+ *       400:
+ *         $ref: '#/components/responses/BadRequest'
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ */
+```
+
+### Verify kaise kiya
+
+- `swagger-jsdoc` se spec bana: **9 operations** mile.
+- Server chalake check: `/api-docs` (`301` -> `/api-docs/` `200` HTML), `swagger-ui-bundle.js` `200`, `/api-docs.json` `200` JSON.
+- Spec ko OpenAPI validator (`swagger-cli validate`) se chalaya: **valid**.
+- Purane routes bigde nahi: `/api/nope` ab bhi JSON `404`, `/api/me` bina token `401`.
+- Browser me page maine khud nahi kholi, tum `http://localhost:9000/api-docs` kholke ek baar dekh lena.
+
+### Files ka summary
+
+| File | Kya hua |
+|---|---|
+| `package.json` | `swagger-ui-express`, `swagger-jsdoc` add |
+| `src/config/swagger.js` | naya: spec config (info, security, reusable components, kahan scan karna hai) |
+| `src/routes/auth.routes.js` | `@openapi` comments (register, login, logout) |
+| `src/routes/user.routes.js` | `@openapi` comment (`/api/me`) |
+| `src/routes/account.routes.js` | `@openapi` comments (create, list, balance) |
+| `src/routes/transaction.routes.js` | `@openapi` comments (transfer, initial funds) |
+| `src/app.js` | `/api-docs` (UI) aur `/api-docs.json` (spec) mount |
+
+### Test ke dauran mili ek important baat (roadmap me sahi kiya)
+
+Amount validation test karte waqt pata chala ki negative amount block hota hai (model ka `min: 0.01`), jabki maine roadmap me ulta likha tha. Roadmap ka A1 ab test ke hisaab se sahi kar diya hai (kya sach me problem hai: string amount, 3 decimals, float galti, self transfer).
+
+
+## Swagger Setup Guide (zero se, beginner ke liye)
+
+> Upar **Step 19** me ye bataya hai ki is project me Swagger kaise lagaya gaya. Ye section alag hai: **bilkul zero se**, ye maan ke ki tumne kabhi Swagger setup nahi kiya. Isko padhke tum kisi bhi naye Express project me khud Swagger laga sakte ho.
+>
+> Pehle chhoti example (`/ping`) se seekhenge, phir batayenge ki is project me wahi cheez kahan hai.
+
+### Is guide ka plan
+
+1. Swagger kya hai aur kyu chahiye
+2. Jo shabd confuse karte hain (OpenAPI, Swagger UI, swagger-jsdoc, YAML)
+3. Shuru karne se pehle kya chahiye
+4. Setup, 10 chhote steps
+5. YAML ka 5 minute crash course
+6. Swagger page ko padhna kaise hai
+7. Galti ho to kya dikhta hai aur fix kaise karein (test karke likha hai)
+8. Naya API add karte waqt checklist
+9. Naye project me 5 minute ka quick setup (copy-paste)
+10. Glossary
+
+---
+
+### 1. Swagger kya hai aur kyu chahiye
+
+Maan lo tumne 10 APIs bana li. Ab sawal:
+
+- Kaun si API ka path kya hai? (`/api/accounts/balance`)
+- Konsa method hai? (`GET` ya `POST`)
+- Body me kya bhejna hai? (`toAccount`, `amount`...)
+- Login chahiye ya nahi?
+- Response kaisa aayega?
+
+Ye sab yaad rakhna ya Postman me manually likhna mushkil hai. **Swagger** isi ka hal hai: ek web page jo saari APIs ki list dikhata hai, aur **wahin se API chala bhi sakte ho** ("Try it out" button).
+
+Fayde:
+
+| Fayda | Matlab |
+|---|---|
+| **Documentation** | Dusra developer (ya 2 mahine baad tum khud) page dekhke samajh jaaye |
+| **Testing** | Postman khole bina browser se hi API chalao |
+| **Hamesha updated** | Docs code ke bagal me hi likhe hain, to bhoolna mushkil hai |
+| **Standard** | Postman, code generators sab is format ko samajhte hain |
+
+### 2. Jo shabd confuse karte hain
+
+| Shabd | Simple matlab | Analogy |
+|---|---|---|
+| **API / endpoint** | Ek URL + method, jaise `POST /api/auth/login` | Restaurant ka ek menu item |
+| **OpenAPI** | API ko describe karne ka **standard format** (JSON ya YAML). Version abhi `3.0.3` use kar rahe hain | Menu likhne ka format |
+| **Swagger UI** | OpenAPI ko padhke sundar page banane wala **tool** | Menu ko chhapne wala printer |
+| **swagger-jsdoc** | Tumhare **code ke comments** padhke OpenAPI file **khud banata hai** | Tum notes likho, wo menu bana de |
+| **swagger-ui-express** | Swagger UI ko **Express me lagane** wala package | Printer ko Express se jodne ki wire |
+| **JSDoc comment** | `/** ... */` wala comment jo function/route ke upar likhte hain | Code ke upar sticky note |
+| **YAML** | `key: value` wali simple text format. OpenAPI yahi use karta hai (neeche crash course hai) | Notes likhne ki bhasha |
+| **Spec** | Final OpenAPI file/object (jisme saari APIs ka description hota hai) | Poora menu |
+
+Note: **Swagger** naam ab aam bolchaal me OpenAPI + Swagger UI dono ke liye use hota hai. Dono sunoge to ghabrana nahi.
+
+### 3. Shuru karne se pehle kya chahiye
+
+- Node.js + Express app jo chal raha ho (`npm run dev` se server start ho).
+- Kam se kam ek route (jaise `POST /api/auth/login`).
+- Terminal project folder me khula ho (jahan `package.json` hai).
+
+Is project me: Express 5, entry `server.js`, app config `src/app.js`, routes `src/routes/*.js`.
+
+### 4. Setup: 10 chhote steps
+
+#### Step 1: Packages install karo
+
+```bash
+npm install swagger-ui-express swagger-jsdoc
+```
+
+- `swagger-ui-express`: page dikhata hai.
+- `swagger-jsdoc`: comments se spec banata hai.
+- Ye `dependencies` me jaate hain (dev me nahi), kyunki server chalte waqt chahiye.
+
+Check: `package.json` me ye dono dikhne chahiye.
+
+#### Step 2: Config file banao (`src/config/swagger.js`)
+
+Ye file batati hai: docs ka title kya hoga, aur comments **kin files me** dhoondhne hain.
+
+**Sabse chhota working version** (itna kaafi hai shuru karne ke liye):
+
+```js
+const path = require('path');
+const swaggerJSDoc = require('swagger-jsdoc');
+
+const options = {
+    definition: {
+        openapi: '3.0.3',                                  // OpenAPI ka version
+        info: {
+            title: 'My API',                               // page ke upar title
+            version: '1.0.0',
+        },
+    },
+    apis: [path.join(__dirname, '../routes/*.js')],        // kin files me comments dhoondhne hain
+};
+
+module.exports = swaggerJSDoc(options);                     // spec bana ke export
+```
+
+Line by line:
+
+| Line | Matlab |
+|---|---|
+| `openapi: '3.0.3'` | Hum OpenAPI ka kaun sa version use kar rahe hain. Is value ko waise hi rakho |
+| `info.title` / `info.version` | Docs page ke upar dikhne wala naam aur version |
+| `apis: [...]` | **Sabse important.** Yahan jo files likhi hongi, sirf unhi ke `@openapi` comments padhe jaayenge |
+| `path.join(__dirname, '../routes/*.js')` | `src/config` se ek folder upar `routes` ke saare `.js` files. `*` = koi bhi naam |
+| `__dirname` kyu | Ye is file ka folder hai. Isse server kisi bhi folder se start ho, path sahi rahega. Sirf `'./src/routes/*.js'` likhte to wo "jahan se `node` chalaya wahi se" dhoondhta, aur galat folder se chalane par kuch na milta |
+| `module.exports = swaggerJSDoc(options)` | Spec ban ke bahar nikalta hai, taaki `app.js` use kar sake |
+
+**Is project me:** `src/config/swagger.js` isi ka bada version hai (isme login, common errors aur data shapes bhi hain, wo Step 7 aur 8 me samjhaunga).
+
+#### Step 3: `app.js` me Swagger page lagao
+
+`src/app.js` me **2 cheezein** add karo.
+
+**(a) Upar imports me:**
+
+```js
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpec = require('./config/swagger');
+```
+
+**(b) Routes se pehle (ya routes ke saath, par 404 handler se pehle):**
+
+```js
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
+// Optional: raw spec JSON me bhi chahiye (Postman me import karne ke liye)
+app.get('/api-docs.json', (req, res) => res.json(swaggerSpec));
+```
+
+Line by line:
+
+| Line | Matlab |
+|---|---|
+| `'/api-docs'` | Browser me ye URL khologe to docs dikhenge. Naam badal sakte ho (jaise `/docs`) |
+| `swaggerUi.serve` | Page ki zaroori files (JS, CSS) deta hai |
+| `swaggerUi.setup(swaggerSpec)` | Hamare spec se page banata hai |
+| `/api-docs.json` | Wahi spec JSON me. Debug karne me bahut kaam aata hai (neeche dekhoge) |
+
+**Order ka dhyaan (is project me):** `app.js` ke end me `notFoundHandler` aur `errorHandler` hain. Swagger ki lines unse **pehle** honi chahiye, warna `/api-docs` ko "route not found" `404` mil jaayega.
+
+Is project ka `app.js`:
+
+```js
+app.use(express.json());
+app.use(cookieParser());
+
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, { swaggerOptions: { persistAuthorization: true } }));
+app.get('/api-docs.json', (req, res) => res.json(swaggerSpec));
+
+app.use('/api/auth', authRouter);
+...
+app.use(notFoundHandler);   // sabse last
+app.use(errorHandler);
+```
+
+(`persistAuthorization: true` ka matlab Step 7 me.)
+
+#### Step 4: Pehli API ka doc likho (comment ke roop me)
+
+Ab server ko batana hai ki ye API exist karti hai. Route ke **upar** ek special comment likhte hain jo `@openapi` se shuru hota hai.
+
+Pehle sabse simple example (koi login nahi, koi body nahi):
+
+```js
+/**
+ * @openapi
+ * /ping:
+ *   get:
+ *     summary: Server zinda hai ya nahi
+ *     responses:
+ *       200:
+ *         description: pong
+ */
+router.get('/ping', pingController);
+```
+
+Is comment ko tod ke samjho:
+
+| Line | Matlab |
+|---|---|
+| `/** ... */` | Normal JSDoc comment. Har line `*` se shuru hoti hai |
+| `@openapi` | **Jadoo ka shabd.** swagger-jsdoc sirf wahi comments uthata hai jisme ye likha ho. Iske bina comment ignore hoga |
+| `/ping:` | API ka **path** (jo URL me aata hai). Ye `router.get('/ping')` wale path jaisa hi hona chahiye, poora (`/api/...` prefix ke saath, jaise `/api/auth/login`) |
+| `get:` | **HTTP method** (`get`, `post`, `put`, `patch`, `delete`), chhote akshar me |
+| `summary:` | Page par ek line ka title |
+| `responses:` | Kaun-kaun se response aa sakte hain. **Ye zaroori hai** |
+| `200:` | HTTP status code |
+| `description: pong` | Us response ka matlab |
+
+> **Yaad rakho:** comment ke andar jo likha hai wo **YAML** hai, aur YAML me **spaces (indentation)** hi structure batate hain. Neeche YAML crash course hai.
+
+**Prefix wali baat (is project me):** `app.js` me `app.use('/api/auth', authRouter)` hai, aur `auth.routes.js` me `router.post('/login')`. To asli URL `/api/auth/login` hai, aur **comment me poora path** likhna hai:
+
+```js
+/**
+ * @openapi
+ * /api/auth/login:       <- poora path, sirf '/login' nahi
+ *   post:
+ ...
+ */
+router.post('/login', userLoginController);
+```
+
+#### Step 5: Server chalao aur page dekho
+
+```bash
+npm run dev
+```
+
+Browser me kholo: **http://localhost:9000/api-docs** (port `.env` ke `PORT` jo hai wahi).
+
+Kya dikhna chahiye:
+
+```
+ Backend Ledger API  1.0.0
+ ┌ Auth ───────────────────────────────┐
+ │ POST /api/auth/register   Naya user register karo │
+ │ POST /api/auth/login      Login karo              │
+ │ POST /api/auth/logout     Logout karo             │
+ └─────────────────────────────────────┘
+ ┌ Accounts ... ┐
+```
+
+Dikha? To setup ho gaya.
+
+**Pehla debug trick:** agar page khula par APIs nahi dikhi, to kholo **http://localhost:9000/api-docs.json**. Isme `"paths": { ... }` dikhega. Agar `paths` khaali `{}` hai, to swagger-jsdoc ko tumhare comments mile hi nahi (Step 2 ka `apis` path ya `@openapi` check karo, troubleshooting me details hain).
+
+Note: `npm run dev` nodemon use karta hai, to routes file save karte hi server restart hota hai. Bas browser me page **refresh** karo.
+
+#### Step 6: "Try it out" se API chalao
+
+1. Kisi API pe click karke kholo (jaise `POST /api/auth/login`).
+2. **Try it out** button dabao.
+3. Request body ka box editable ho jaata hai, usme `example` wali values pehle se bhari hongi. Badlo.
+4. **Execute** dabao.
+5. Neeche **Response** me status code (`200`, `401`...) aur body dikhegi. Saath me `curl` command bhi milti hai (jo terminal me chala sakte ho).
+
+Ye wahi API hit karta hai jo Postman karta, bas tum browser me ho.
+
+#### Step 7: Login wali (protected) APIs ke liye "Authorize"
+
+Hamari kai APIs me login zaroori hai (`/api/me`, `/api/accounts/balance`...). Unke liye 2 kaam:
+
+**(a) Config me batao ki login ka tareeka kya hai** (`src/config/swagger.js` ke `definition` ke andar):
+
+```js
+components: {
+    securitySchemes: {
+        bearerAuth: {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: 'JWT',
+        },
+    },
+},
+```
+
+Matlab: "login ka token `Authorization: Bearer <token>` header me jaata hai". Ye wahi hai jo hamara `authMiddleware` padhta hai.
+
+**(b) Jis API me login chahiye, uske comment me `security` likho:**
+
+```js
+/**
+ * @openapi
+ * /api/me:
+ *   get:
+ *     summary: Logged in user ki info
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: User info
+ */
+```
+
+- `bearerAuth` naam wahi hona chahiye jo (a) me rakha. Spelling mismatch hui to lock kaam nahi karega.
+- `- bearerAuth: []` me `-` YAML list ka item hai, aur `[]` ka matlab "koi extra scope nahi".
+- Public APIs (register, login, logout) me `security` **mat** likhna.
+
+**Ab use kaise karein:**
+
+1. `POST /api/auth/login` chalao, response me `token` milega (lamba text).
+2. Token ko copy karo, **quotes ke bina**.
+3. Page ke upar right me **Authorize** (hara button, lock icon) dabao.
+4. Box me token paste karo. **`Bearer` mat likhna**, Swagger khud lagata hai.
+5. **Authorize** phir **Close**.
+6. Ab lock wali APIs `Try it out` se chalengi. Lock ab "band" dikhta hai.
+
+`persistAuthorization: true` (jo `swaggerUi.setup` me diya hai) ka matlab: page refresh karne par token yaad rahe, baar-baar paste na karna pade. (Ye token browser ke `localStorage` me rehta hai, isliye kisi ko share mat karna.)
+
+**Cookie wali ek chhoti baat:** login karne par hamara server `jwt_token` naam ki cookie bhi set karta hai, aur browser use same site par khud bhej deta hai. To kabhi-kabhi **Authorize kiye bina bhi** protected API chal jaati hai. Ye bug nahi hai. Test karna ho ki "bina login ke kya hota hai", to pehle `POST /api/auth/logout` chalao.
+
+#### Step 8: Baar-baar likhne se bacho: `components` aur `$ref`
+
+Dekho: har protected API ka `401` response ek jaisa hai. Har jagah copy-paste karna galat hai. Isliye ek baar likhte hain, aur baaki jagah **reference** (`$ref`) dete hain. Ye programming ke "function" jaisa hai.
+
+**Ek baar `swagger.js` me likho:**
+
+```js
+components: {
+    responses: {
+        Unauthorized: {
+            description: 'Token missing / invalid / expired',
+            content: {
+                'application/json': {
+                    example: { message: 'Unauthorized access, token is missing', status: 'failed' },
+                },
+            },
+        },
+    },
+},
+```
+
+**Phir kisi bhi route me bas ye likho:**
+
+```yaml
+responses:
+  401:
+    $ref: '#/components/responses/Unauthorized'
+```
+
+`$ref: '#/components/responses/Unauthorized'` ka matlab: "us file ke `components` > `responses` > `Unauthorized` wala hissa yahan laga do". `#` ka matlab "isi spec ke andar".
+
+Isi tarah **data ki shape** (`schemas`) bhi reuse hoti hai. Is project me `User`, `Account`, `Transaction` banaye hain:
+
+```js
+schemas: {
+    Account: {
+        type: 'object',
+        properties: {
+            _id: { type: 'string' },
+            status: { type: 'string', enum: ['ACTIVE', 'FROZEN', 'CLOSED'] },
+            currency: { type: 'string', example: 'INR' },
+        },
+    },
+},
+```
+
+Route me use:
+
+```yaml
+account: { $ref: '#/components/schemas/Account' }
+```
+
+Is project ke reusable pieces:
+
+| Type | Naam |
+|---|---|
+| `responses` | `Unauthorized`, `BadRequest`, `NotFound` |
+| `schemas` | `ErrorResponse`, `User`, `Account`, `Transaction` |
+| `securitySchemes` | `bearerAuth` |
+
+#### Step 9: Alag-alag type ki APIs kaise document karein
+
+Ye cheat sheet hai. Jo API jaisi ho, waisa pattern copy karo.
+
+**(a) GET, bina login, bina body**
+
+```yaml
+/api/ping:
+  get:
+    summary: Health check
+    responses:
+      200:
+        description: OK
+```
+
+**(b) POST jisme JSON body jaati hai** (jaise login):
+
+```yaml
+/api/auth/login:
+  post:
+    summary: Login karo
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [email, password]            # inke bina request galat
+            properties:
+              email: { type: string, example: rishabh@example.com }
+              password: { type: string, example: password123 }
+    responses:
+      200:
+        description: Login ho gaya
+      401:
+        description: Email ya password galat
+```
+
+- `required: [...]` me jo naam hain, Swagger page unko `* required` dikhata hai.
+- `type` options: `string`, `number`, `integer`, `boolean`, `array`, `object`.
+- `example` Try it out me pehle se bhar jaata hai.
+- Number limit: `{ type: number, minimum: 0.01 }`. Text length: `{ type: string, minLength: 8 }`. Fixed options: `{ type: string, enum: [ACTIVE, FROZEN] }`.
+
+**(c) Protected API** (login chahiye): upar wale kisi bhi pattern me ye add karo:
+
+```yaml
+security:
+  - bearerAuth: []
+```
+
+**(d) URL me id wali API** (path parameter, jaise `GET /api/accounts/:accountId`). *Abhi is project me ye API nahi hai, aage banegi to kaam aayega.* Dhyaan: OpenAPI me `:accountId` ki jagah `{accountId}` likhte hain.
+
+```yaml
+/api/accounts/{accountId}:
+  get:
+    summary: Ek account ki info
+    parameters:
+      - in: path
+        name: accountId
+        required: true
+        schema: { type: string }
+        description: Account ki id
+    responses:
+      200:
+        description: Account mil gaya
+      404:
+        $ref: '#/components/responses/NotFound'
+```
+
+**(e) Query parameter wali API** (jaise `GET /api/transactions?page=1&limit=10`). *Ye bhi abhi project me nahi hai (roadmap me hai).*
+
+```yaml
+/api/transactions:
+  get:
+    summary: Transaction history
+    parameters:
+      - in: query
+        name: page
+        schema: { type: integer, default: 1 }
+      - in: query
+        name: limit
+        schema: { type: integer, default: 10, maximum: 50 }
+    responses:
+      200:
+        description: Transactions ki list
+```
+
+**(f) Ek hi path pe 2 methods** (is project me `/api/accounts` pe `POST` aur `GET` dono hain): dono ke **alag-alag `@openapi` comment blocks** likhe hain, har route ke upar ek. Ek hi block me bhi likh sakte ho, par alag block zyada saaf rehta hai.
+
+**(g) Array wala response** (list):
+
+```yaml
+accounts:
+  type: array
+  items:
+    type: object
+    properties:
+      accountId: { type: string }
+      name: { type: string }
+```
+
+**(h) Alag-alag status codes ko alag documentation:** hamare transfer API me `201` (success), `200` (pehle hi complete), `202` (pending), `400`, `401`, `409` sab likhe hain. Jitne codes asli me aa sakte hain, utne likho.
+
+#### Step 10: Tags se APIs ko groups me baanto
+
+Page par APIs groups me dikhti hain (Auth, Accounts...). Iske liye 2 jagah:
+
+**(a) `swagger.js` me group ke naam aur description:**
+
+```js
+tags: [
+    { name: 'Auth', description: 'Register, login, logout' },
+    { name: 'Accounts', description: 'Account create, list, balance' },
+],
+```
+
+**(b) Har route ke comment me:** `tags: [Accounts]`.
+
+Jis API ka tag nahi hota wo `default` group me chali jaati hai. Naam ki spelling dono jagah same rakho.
+
+---
+
+### 5. YAML ka 5 minute crash course
+
+Comments ke andar sab kuch YAML hai. Itna jaanna kaafi hai:
+
+**1. `key: value`** (colon ke baad **ek space** zaroori):
+
+```yaml
+summary: Login karo
+```
+
+**2. Indentation = andar ka hissa.** 2 spaces se ek level andar. **Tab mat use karo, sirf spaces.**
+
+```yaml
+post:                  # level 0
+  summary: Login       # level 1: post ke andar
+  responses:           # level 1
+    200:               # level 2: responses ke andar
+      description: OK  # level 3: 200 ke andar
+```
+
+**3. List (`-`)**:
+
+```yaml
+tags:
+  - Auth
+  - Accounts
+```
+
+**4. Chhota (inline) likhne ka tareeka** (curly `{}` object ke liye, square `[]` list ke liye):
+
+```yaml
+email: { type: string, example: a@b.com }
+required: [email, password]
+```
+
+Ye upar wale lambe version jaisa hi hai, bas ek line me.
+
+**5. Special characters wali text ko quotes me likho.** YAML me `:` (colon + space), `[`, `{`, `#` ka khaas matlab hota hai. Text me ye aaye to quotes lagao:
+
+```yaml
+summary: "[System user only] Funds daalo"     # sahi
+summary: [System user only] Funds daalo       # GALAT, YAML confuse ho jaata hai
+```
+
+**6. Lambi description ke liye `|`** (har line ka alag-alag line rehna):
+
+```yaml
+description: |
+  Pehli line.
+  Doosri line.
+```
+
+**7. Comment ke andar har line `*` se shuru** hoti hai. `*` ke baad ek space aur phir YAML. Poore block me **same alignment** rakho:
+
+```js
+/**
+ * @openapi
+ * /api/me:
+ *   get:                  <- `*` ke baad 3 spaces, ye path ke andar hai
+ *     summary: Info       <- 5 spaces, get ke andar
+ */
+```
+
+---
+
+### 6. Swagger page ko padhna kaise hai
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Backend Ledger API 1.0.0           [ Authorize 🔓 ]  <-- token yahan daalo
+│ (description yahan dikhti hai)                           │
+│                                                          │
+│ ▼ Auth                      <-- tag (group)              │
+│   POST /api/auth/login   Login karo       <-- ek API     │
+│   ...                                                    │
+│ ▼ Accounts                                               │
+│   GET  /api/accounts/balance  🔒          <-- 🔒 = login chahiye
+│                                                          │
+│ ▼ Schemas                   <-- components.schemas       │
+└─────────────────────────────────────────────────────────┘
+```
+
+Ek API kholne par:
+
+| Hissa | Matlab |
+|---|---|
+| **Parameters** | URL/query me kya dena hai |
+| **Request body** | Body ka example, `Example Value` aur `Schema` tab me |
+| **Try it out / Execute** | API chalane ke liye |
+| **Responses** | Kaun-kaun se status codes aa sakte hain (tumne jo likha) |
+| **Server response** | Execute karne ke baad **asli** response (code, body, headers) |
+| **Curl** | Wahi request terminal command ke roop me |
+
+---
+
+### 7. Galti ho to kya dikhta hai aur fix kaise karein
+
+Ye sab maine **khud test karke** likha hai. Sabse important baat: **galti hone par server crash nahi hota**, bas wo API docs me **chupchap gayab** ho jaati hai. Isliye "page me API nahi dikhi" ka matlab hai ki kuch galat likha hai.
+
+| Dikkat | Kya hota hai | Wajah / Fix |
+|---|---|---|
+| Page khula par saari APIs gayab (`paths` khaali) | `/api-docs.json` me `"paths": {}` | `apis` ka path galat hai. `path.join(__dirname, '../routes/*.js')` check karo (folder ka naam, `../` ki ginti) |
+| Ek hi API gayab | Baaki dikhti hain | Us comment me `@openapi` likha hi nahi, ya YAML galat hai (neeche wali row) |
+| Terminal me `YAMLSyntaxError: All collection items must start at the same column` dikha | Server chalta rehta hai, par **us poori file** ki APIs docs se gayab | Indentation galat. Us file ke saare comments check karo, spaces barabar karo, **tab hatao** |
+| Wahi `YAMLSyntaxError`, line `summary: [System ...] ...` | Wahi | Text me `[`, `:` hai. **Quotes me likho** (`summary: "..."`) |
+| `/api-docs` par "Route not found" `404` JSON | Error handler se match ho gaya | `app.use('/api-docs', ...)` ko `notFoundHandler` se **pehle** rakho |
+| `Cannot GET /api-docs` | Route mounted nahi hai | `app.js` me `app.use('/api-docs', ...)` add karo aur server restart karo |
+| `/api-docs` ne `301` diya | Normal | `/api-docs/` (aakhir me `/`) pe redirect hota hai, kuch fix nahi karna |
+| Lock dikha par `401 token is missing` aaya | Token bheja hi nahi gaya | **Authorize** me token daala? Token sahi copy kiya (quotes ke bina)? `security` me naam `bearerAuth` hi hai? |
+| Authorize kiya par `401 token is invalid` | Token galat/expire | Dobara login karke naya token lo. Token ke aage `Bearer` mat likhna |
+| Comment badla par page me purana dikha | Browser purana page dikha raha hai | Server restart hua? Page **hard refresh** karo (Cmd+Shift+R) |
+| Path ke aage `/api/...` nahi likha, API alag dikhi | Docs me `/login` aaya, asli `/api/auth/login` hai | Comment me **poora path** likho (prefix ke saath) |
+| Spec validate karne par `must have required property 'responses'` aata hai | `swagger-jsdoc` kuch nahi bolta, par spec **invalid** hai (validator pakadta hai) | Har method me `responses:` zaroori hai, kam se kam ek status code |
+| `paths` me `"get"` naam ki ajeeb entry | Comment me `/path:` wali line likhi hi nahi | `@openapi` ke turant baad `/api/...:` wali line likho |
+| Authorize ka button hi nahi dikha | `securitySchemes` config me nahi hai | `components.securitySchemes.bearerAuth` add karo |
+
+**Debug karne ka 3-step tarika (jab bhi kuch na dikhe):**
+
+1. `http://localhost:9000/api-docs.json` kholo, dekho `paths` me tumhari API hai ya nahi.
+2. Terminal (jahan server chal raha hai) me `YAMLSyntaxError` dhoondo. Wo bata deta hai kaun si file aur kaun si line.
+3. Spec valid hai ya nahi, ye check karna ho to `.json` ko save karke:
+
+```bash
+npx @redocly/cli lint spec.json
+```
+
+(Ya online `editor.swagger.io` me spec paste karke error dekh sakte ho.)
+
+---
+
+### 8. Naya API banao to ye checklist follow karo
+
+- [ ] Route aur controller bana liya.
+- [ ] Route ke **upar** `@openapi` comment likha (`@openapi` shabd ke saath).
+- [ ] Path **poora** likha (`/api/...`), method chhote akshar me (`get`, `post`...).
+- [ ] `tags` diya aur wo `swagger.js` ke `tags` me exist karta hai.
+- [ ] `summary` ek line me likha.
+- [ ] Protected hai to `security: - bearerAuth: []`.
+- [ ] Body leta hai to `requestBody` + `required` + `example` values.
+- [ ] URL me `{id}` ya `?page=` hai to `parameters`.
+- [ ] `responses` me jitne codes asli me aa sakte hain (success + `400`/`401`/`404`...).
+- [ ] Common errors ke liye `$ref` use kiya (copy-paste nahi).
+- [ ] Server restart hua, `/api-docs` refresh karke API dikhi.
+- [ ] `Try it out` se ek baar chalake dekha ki docs aur asli behaviour match karte hain.
+
+**Sabse badi aadat:** docs aur code ko saath me update karo. Agar API ki body badli (naya field aaya), to comment bhi usi waqt badlo. Purana doc bina doc ke se zyada nuksaan karta hai.
+
+---
+
+### 9. Naye project me 5 minute ka quick setup (copy-paste)
+
+Maan lo ek naya Express project hai jisme `src/app.js` aur `src/routes/` hai.
+
+**1. Install:**
+
+```bash
+npm install swagger-ui-express swagger-jsdoc
+```
+
+**2. `src/config/swagger.js` banao:**
+
+```js
+const path = require('path');
+const swaggerJSDoc = require('swagger-jsdoc');
+
+module.exports = swaggerJSDoc({
+    definition: {
+        openapi: '3.0.3',
+        info: { title: 'My API', version: '1.0.0' },
+        components: {
+            securitySchemes: {
+                bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+            },
+        },
+    },
+    apis: [path.join(__dirname, '../routes/*.js')],
+});
+```
+
+**3. `src/app.js` me:**
+
+```js
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpec = require('./config/swagger');
+
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+```
+
+**4. Kisi route ke upar comment:**
+
+```js
+/**
+ * @openapi
+ * /api/hello:
+ *   get:
+ *     summary: Hello bolo
+ *     responses:
+ *       200:
+ *         description: Hello
+ */
+router.get('/hello', helloController);
+```
+
+**5. Server chalao, browser me kholo:** `http://localhost:<PORT>/api-docs`. Ho gaya.
+
+Baaki sab (components, tags, `$ref`, params) isi base par upar ke steps ke hisaab se jodte jao.
+
+---
+
+### 10. Glossary (chhota shabdkosh)
+
+| Shabd | Matlab |
+|---|---|
+| **Endpoint** | Ek API ka address + method (`POST /api/auth/login`) |
+| **Spec** | OpenAPI ki file / object jisme saari APIs ka description hai |
+| **Path** | URL ka hissa (`/api/me`) |
+| **Operation** | Ek path + ek method ka combination. Is project me 9 hain |
+| **Tag** | APIs ka group naam |
+| **Schema** | Data ki shape (kaun se fields, kaun sa type) |
+| **`$ref`** | "Wahan likha hua tukda yahan laga do" |
+| **Component** | Reusable tukda (schemas, responses, securitySchemes) |
+| **Bearer token** | Header me `Authorization: Bearer <token>` wala login token (JWT) |
+| **Request body** | POST/PATCH me jo JSON bhejte hain |
+| **Path parameter** | URL ke andar ka variable (`/accounts/{id}`) |
+| **Query parameter** | URL me `?` ke baad wale (`?page=1`) |
+| **Try it out** | Page se API chalane wala button |
+| **Authorize** | Page par token daalne wala button |
+| **persistAuthorization** | Refresh ke baad bhi token yaad rakhne wali setting |
+| **swagger-jsdoc** | Comments se spec banane wala package |
+| **swagger-ui-express** | Spec se page banane aur Express me lagane wala package |
+
+### Aage kya seekh sakte ho
+
+- Docs ko sirf development me dikhana: `if (process.env.NODE_ENV !== 'production') { app.use('/api-docs', ...) }`.
+- Spec ko `/api-docs.json` se **Postman me import** karo (Import > Link).
+- Naye APIs aaye (history, statement, revert...) to har ek ka `@openapi` comment likhne ki practice karo (roadmap dekho).
+- Validation (`zod`/`joi`) aane par request schema aur docs ek hi jagah se banane ke tareeke (`zod-to-openapi`) bhi hote hain.
+
+
 ## Roadmap: Aage kya-kya develop karna hai (TODO list)
 
 Ye section "future plan" hai. Jo cheez ho jaaye, uska checkbox `[x]` karke upar ke steps me uski entry (kya, kyu, kaise) likhni hai.
@@ -1471,11 +2420,12 @@ Ye section "future plan" hai. Jo cheez ho jaaye, uska checkbox `[x]` karke upar 
 | User | `GET /api/me` |
 | Account | `POST /api/accounts`, `GET /api/accounts` (list), `GET /api/accounts/balance` |
 | Transaction | `POST /api/transactions` (transfer), `POST /api/transactions/system/initial-funds` |
-| Common | `sendResponse` helper, auth + system user middleware, MongoDB session transactions |
+| Common | `sendResponse` helper, `ApiError` + global error handler, auth + system user middleware, MongoDB session transactions |
+| Docs | Swagger UI at `/api-docs` |
 
 ### Priority order (suggested)
 
-1. [ ] Amount validation (live security hole, neeche Section A)
+1. [ ] Amount validation + self transfer block (neeche Section A)
 2. [ ] `GET /api/transactions` (history + pagination)
 3. [ ] `GET /api/accounts/statement`
 4. [ ] Account freeze / close
@@ -1489,23 +2439,29 @@ Is order ka reason: pehle security hole band ho, phir history dekhna, phir ledge
 
 ### Section A: Pehle fix karne wali cheezein (bugs / security)
 
-#### A1. Amount validation (sabse zaroori)
+#### A1. Amount validation
 
-- [ ] **Problem:** Abhi `amount` pe sirf "present hai ya nahi" check hai (`!amount`). Isliye:
-  - **Negative amount** bhejne par sender ka DEBIT negative ho jaata hai, yaani sender ka balance **badh jaata hai** aur receiver ka ghat jaata hai (ulta paisa nikaal sakte hain).
-  - `"abc"`, `NaN`, `Infinity` jaisi values.
-  - `0` ko `!amount` pakad leta hai, par `"0"` (string) ya `0.0000001` nahi.
-  - Bahut zyada decimals (`10.123456`) se floating point galtiyan.
+- [ ] **Pehle maine yahan likha tha ki negative amount se ulta paisa nikal sakte hain. Wo galat tha.** Test karke dekha (Step 19 ke time): `transaction.model.js` me `amount` pe `min: 0.01` hai, aur transaction `create` ledger entries se **pehle** hota hai. Isliye negative amount par `400 Amount must be greater than 0` aata hai aur kuch save nahi hota (rollback). Security hole nahi hai. Lekin ledger model ke `amount` pe `min` nahi hai, wo sirf is order ki wajah se bacha hua hai.
+- [ ] **Jo problems sach me hain (test se confirm):**
+
+  | Input | Abhi kya hota hai |
+  |---|---|
+  | `"10"` (string) | `201`, chal jaata hai (Mongoose number me cast kar deta hai) |
+  | `"abc"` | `400`, par message Mongoose ka lamba Cast error hai |
+  | `10.123` (3 decimals) | `201`, chal jaata hai |
+  | float galti | 100 me se 10.123 bheja to balance `79.87700000000001` aaya |
+  | `0` | `400`, par message "Missing required fields" (galat wajah batata hai, kyunki `!amount` check `0` ko missing samajhta hai) |
+  | validation ka time | DB queries (accounts, balance) ke **baad** hota hai, pehle hona chahiye |
+
 - [ ] **Kya karna hai:**
-  - `typeof amount === 'number'`, `Number.isFinite(amount)`, `amount > 0`.
-  - Max limit (jaise single transfer pe 1,00,000) aur max 2 decimal places.
-  - Dono controllers (`createTransactionController`, `createInitialFundsTransactionController`) me.
-  - Better: ledger me amount **paise (integer)** me store karo (`10.50` -> `1050`), kyunki `Number` float me paise ka hisaab galat ho sakta hai.
+  - Controller ke shuru me hi: `typeof amount === 'number'`, `Number.isFinite(amount)`, `amount > 0`, max limit, max 2 decimal places. Dono controllers me.
+  - Ledger model ke `amount` me bhi `min: 0.01` (double safety).
+  - Better: amount **paise (integer)** me store karo (`10.50` -> `1050`), taaki float galti na aaye.
 - [ ] **Seekhoge:** input validation, floating point problem, money ko integer me kaise rakhte hain.
 
 #### A2. Self transfer block
 
-- [ ] `fromAccount` aur `toAccount` same ho to `400` ("Cannot transfer to your own account"). Abhi aisa transfer chal jaata hai.
+- [ ] `fromAccount` aur `toAccount` same ho to `400` ("Cannot transfer to your own account"). Abhi aisa transfer chal jaata hai (test karke confirm kiya: `201` aata hai aur ledger me DEBIT + CREDIT dono entries ban jaati hain).
 
 #### A3. Transfer me race condition (double spend)
 
@@ -1672,7 +2628,7 @@ Is order ka reason: pehle security hole band ho, phir history dekhna, phir ledge
 | **Logging** | `console.log` ki jagah proper logs | `pino` ya `winston`, request id |
 | **Env validation** | Server start pe `.env` check | `JWT_SECRET`, `MONGO_URI` missing ho to fail fast |
 | **Tests** | Transfer flow ke automated tests | `jest` + `supertest` + `mongodb-memory-server` (replica set mode) |
-| **API docs** | Swagger | `swagger-ui-express` + OpenAPI file |
+| **API docs** | **Ho gaya (Step 19).** Swagger | `swagger-ui-express` + `swagger-jsdoc` |
 | **Request collection** | `request.http` ko complete rakhna | Har naye API ka example add karo |
 | **Seed script** | System user + test data ek command me | `scripts/seed.js` (abhi system user DB me manually banana padta hai) |
 | **Docker compose** | Mongo replica set + app ek command me | `docker-compose.yml` (abhi `mongo-rs` manually chalaya tha) |
