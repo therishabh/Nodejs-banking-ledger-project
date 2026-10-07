@@ -98,7 +98,7 @@ Router.post("/", authMiddleware, createTransactionController);
  *         content:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/ErrorResponse' }
- *             example: { message: Unauthorized access, token is invalid or user is not a system user, status: failed }
+ *             example: { message: "Unauthorized access, token is invalid or user is not a system user", status: failed }
  *       409:
  *         description: Same idempotencyKey wali transaction FAILED / REVERTED hai
  */

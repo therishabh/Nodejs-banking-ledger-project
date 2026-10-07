@@ -27,6 +27,9 @@ app.use(
 app.get('/api-docs.json', (req, res) => res.json(swaggerSpec));
 
 // Routes
+app.get('/', (req, res) => {
+    res.send('Project running successfully')
+})
 app.use('/api/auth', authRouter);
 app.use('/api/accounts', accountRouter);
 app.use('/api/transactions', transactionRouter);
